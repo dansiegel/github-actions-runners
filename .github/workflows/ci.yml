@@ -16,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: '3.12'
 
@@ -42,7 +42,7 @@ jobs:
         run: ./scripts/destroy-azure.sh --config config/runners.example.yaml --dry-run
 
       - name: Upload dry-run plan artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: github-actions-runners-plan
           path: artifacts/plan.json
