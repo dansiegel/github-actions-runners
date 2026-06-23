@@ -1,0 +1,123 @@
+version: 1
+project: github-actions-runners
+
+defaults:
+  totalRunnerCap: 20
+  openSourceReady: true
+  privateFirst: true
+  sharedPackageCache:
+    enabled: true
+    root: /mnt/actions-cache/packages
+    maxSizeGb: 20
+    pruneAfterDays: 14
+    ownership: actions-runner:actions-runner
+    packageManagers: [apt, npm, nuget, pip, cargo, go]
+  azure:
+    subscriptionId: ${AZURE_SUBSCRIPTION_ID}
+    tenantId: ${AZURE_TENANT_ID}
+    resourceGroup: gha-runners-dev
+    region: eastus
+    deploymentIdentity:
+      scope: resourceGroup
+      resourceGroup: gha-runners-dev
+      note: least privilege identity scoped to this resource group for Microsoft.Compute, Microsoft.Network, Microsoft.ManagedIdentity, and Microsoft.Resources deployments.
+    network:
+      vnetName: gha-runners-vnet
+      addressPrefix: 10.42.0.0/16
+      subnetName: runners
+      subnetPrefix: 10.42.1.0/24
+      nsgName: gha-runners-nsg
+    tags:
+      project: github-actions-runners
+      environment: dev
+      owner: ${OWNER_TAG}
+      managed-by: azure-cli
+  github:
+    apiBaseUrl: https://api.github.com
+    runnerScopeDefault: repository
+    ephemeral: true
+    runnerRelease:
+      version: 2.335.1
+      sha256:
+        linux-x64: 4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
+        linux-arm64: 6d1e85bfd1a506a8b17c1f1b9b57dba458ffed90898799aaa9f599520b0d9207
+    tokenProvider:
+      type: command
+      command: scripts/github-runner-token.example.sh
+      vmCredentialSource:
+        type: managedIdentityGitHubApp
+        keyVaultName: ${GITHUB_APP_KEY_VAULT_NAME}
+        appIdSecretName: github-app-id
+        privateKeySecretName: github-app-private-key
+        installationIdSecretName: github-app-installation-id
+
+runnerPools:
+  - name: sh-linux
+    os: linux
+    arch: x64
+    labels: [self-hosted, linux, x64, azure, sh-linux]
+    azure:
+      vmSize: Standard_D2s_v5
+      image: Ubuntu2404
+      orchestrationMode: Uniform
+      upgradePolicyMode: automatic
+      publicIp: false
+    minRunners: 0
+    maxRunners: 10
+    idleTimeoutMinutes: 15
+    scalingMode: fixed-capacity-v1
+    ephemeral: true
+
+  - name: sh-linux-lg
+    os: linux
+    arch: x64
+    labels: [self-hosted, linux, x64, azure, sh-linux-lg]
+    azure:
+      vmSize: Standard_D4s_v5
+      image: Ubuntu2404
+      orchestrationMode: Uniform
+      upgradePolicyMode: automatic
+      publicIp: false
+    minRunners: 0
+    maxRunners: 10
+    idleTimeoutMinutes: 15
+    scalingMode: fixed-capacity-v1
+    ephemeral: true
+
+accounts:
+  - kind: user
+    owner: example-user
+    visibility: private
+    repositories:
+      - name: repo-one
+        fullName: example-user/repo-one
+        pool: sh-linux
+        runnerScope: repository
+        maxRunners: 5
+        enabled: true
+        registration:
+          runnerUrl: https://github.com/example-user/repo-one
+      - name: repo-two
+        fullName: example-user/repo-two
+        pool: sh-linux-lg
+        runnerScope: repository
+        maxRunners: 5
+        enabled: true
+        registration:
+          runnerUrl: https://github.com/example-user/repo-two
+
+  - kind: organization
+    owner: example-org
+    visibility: private
+    runnerGroup: default
+    repositories:
+      include: [api-service, web-app]
+      exclude: []
+      defaultPool: sh-linux
+    pools:
+      - pool: sh-linux
+        runnerScope: organization
+        repositoryAllowList: [api-service, web-app]
+        maxRunners: 10
+        registration:
+          runnerUrl: https://github.com/example-org

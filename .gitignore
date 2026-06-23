@@ -1,0 +1,32 @@
+# Local/private config
+config/runners.yaml
+config/*.local.yaml
+.env
+.env.*
+*.env
+
+# Generated plans, rendered bootstrap material, and local evidence output
+.plan/
+artifacts/
+logs/
+*.log
+rendered/
+cloud-init-*.yaml
+
+# Secrets and keys
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+
+# Runner downloads/cache
+_runner/
+actions-runner-*.tar.gz
+
+# Python/test cache
+__pycache__/
+.pytest_cache/
+.coverage
+coverage/

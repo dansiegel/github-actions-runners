@@ -1,0 +1,21 @@
+version: 1
+project: github-actions-runners
+defaults:
+  github:
+    tokenProvider:
+      type: command
+      command: scripts/github-runner-token.example.sh
+runnerPools:
+  - name: sh-linux
+    os: linux
+    arch: x64
+accounts:
+  - kind: user
+    owner: example-user
+    visibility: private
+    repositories:
+      - name: repo-one
+        fullName: example-user/repo-one
+        pool: sh-linux
+        registration:
+          runnerUrl: https://github.com/example-user/repo-one

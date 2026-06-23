@@ -1,0 +1,104 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+  - jq
+  - tar
+  - unzip
+  - ca-certificates
+  - coreutils
+  - openssl
+  - python3
+write_files:
+{{TOKEN_PROVIDER_WRITE_FILE}}
+  - path: /opt/github-actions-runners/bootstrap-runner.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      RUNNER_POOL='{{POOL_NAME}}'
+      RUNNER_BINDING='{{BINDING_NAME}}'
+      RUNNER_URL='{{RUNNER_URL}}'
+      RUNNER_LABELS='{{RUNNER_LABELS}}'
+      RUNNER_EPHEMERAL='{{RUNNER_EPHEMERAL}}'
+      RUNNER_OS='{{RUNNER_OS}}'
+      RUNNER_ARCH='{{RUNNER_ARCH}}'
+      RUNNER_ASSET_NAME='{{RUNNER_ASSET_NAME}}'
+      RUNNER_DOWNLOAD_URL='{{RUNNER_DOWNLOAD_URL}}'
+      RUNNER_SHA256='{{RUNNER_SHA256}}'
+      RUNNER_GROUP='{{RUNNER_GROUP}}'
+      TOKEN_PROVIDER_COMMAND='{{TOKEN_PROVIDER_COMMAND}}'
+      SHARED_PACKAGE_CACHE_ENABLED='{{SHARED_PACKAGE_CACHE_ENABLED}}'
+      SHARED_PACKAGE_CACHE_ROOT='{{SHARED_PACKAGE_CACHE_ROOT}}'
+      SHARED_PACKAGE_CACHE_MAX_SIZE_GB='{{SHARED_PACKAGE_CACHE_MAX_SIZE_GB}}'
+      SHARED_PACKAGE_CACHE_PRUNE_AFTER_DAYS='{{SHARED_PACKAGE_CACHE_PRUNE_AFTER_DAYS}}'
+      SHARED_PACKAGE_CACHE_OWNERSHIP='{{SHARED_PACKAGE_CACHE_OWNERSHIP}}'
+      NPM_CONFIG_CACHE='{{NPM_CACHE_DIR}}'
+      PIP_CACHE_DIR='{{PIP_CACHE_DIR}}'
+      NUGET_PACKAGES='{{NUGET_PACKAGES_DIR}}'
+      DOTNET_CLI_HOME='{{DOTNET_CLI_HOME_DIR}}'
+      CARGO_HOME='{{CARGO_HOME_DIR}}'
+      GOMODCACHE='{{GOMODCACHE_DIR}}'
+      GOCACHE='{{GOCACHE_DIR}}'
+      XDG_CACHE_HOME='{{XDG_CACHE_HOME_DIR}}'
+      APT_CACHE_DIR='{{APT_CACHE_DIR}}'
+      GHA_REGISTRATION_TOKEN_ENDPOINT='{{REGISTRATION_TOKEN_ENDPOINT}}'
+      GHA_RUNNER_SCOPE='{{RUNNER_SCOPE}}'
+      GHA_TARGET_KIND='{{TARGET_KIND}}'
+      GHA_TARGET_OWNER='{{TARGET_OWNER}}'
+      GHA_TARGET_REPOSITORY='{{TARGET_REPOSITORY}}'
+      GHA_RUNNER_URL="$RUNNER_URL"
+      GHA_BINDING_NAME="$RUNNER_BINDING"
+{{TOKEN_PROVIDER_ENVIRONMENT}}
+      export GHA_REGISTRATION_TOKEN_ENDPOINT GHA_RUNNER_URL GHA_RUNNER_SCOPE GHA_BINDING_NAME GHA_TARGET_KIND GHA_TARGET_OWNER GHA_TARGET_REPOSITORY AZURE_KEY_VAULT_NAME GITHUB_APP_ID_SECRET_NAME GITHUB_APP_PRIVATE_KEY_SECRET_NAME GITHUB_APP_INSTALLATION_ID_SECRET_NAME AZURE_CLIENT_ID
+      if [ -z "$RUNNER_URL" ] || [ -z "$TOKEN_PROVIDER_COMMAND" ] || [ -z "$GHA_REGISTRATION_TOKEN_ENDPOINT" ]; then
+        echo "runner bootstrap failed closed: runner URL, token endpoint, and token provider command are required" >&2
+        exit 70
+      fi
+      TOKEN="$(bash -lc "$TOKEN_PROVIDER_COMMAND")"
+      if [ -z "$TOKEN" ]; then
+        echo "runner bootstrap failed closed: token provider returned no token" >&2
+        exit 70
+      fi
+      useradd --system --create-home --home-dir /opt/actions-runner actions-runner || true
+      if [ "$SHARED_PACKAGE_CACHE_ENABLED" = "true" ]; then
+        mkdir -p "$SHARED_PACKAGE_CACHE_ROOT"
+        for cache_dir in "$NPM_CONFIG_CACHE" "$PIP_CACHE_DIR" "$NUGET_PACKAGES" "$DOTNET_CLI_HOME" "$CARGO_HOME" "$GOMODCACHE" "$GOCACHE" "$XDG_CACHE_HOME" "$APT_CACHE_DIR"; do
+          if [ -n "$cache_dir" ]; then
+            mkdir -p "$cache_dir"
+          fi
+        done
+        chown -R "$SHARED_PACKAGE_CACHE_OWNERSHIP" "$SHARED_PACKAGE_CACHE_ROOT"
+        find "$SHARED_PACKAGE_CACHE_ROOT" -type f -mtime +"$SHARED_PACKAGE_CACHE_PRUNE_AFTER_DAYS" -delete || true
+        current_kb="$(du -sk "$SHARED_PACKAGE_CACHE_ROOT" | awk '{print $1}')"
+        max_kb=$((SHARED_PACKAGE_CACHE_MAX_SIZE_GB * 1024 * 1024))
+        if [ "${current_kb:-0}" -gt "$max_kb" ]; then
+          find "$SHARED_PACKAGE_CACHE_ROOT" -type f -mtime +7 -delete || true
+        fi
+        export NPM_CONFIG_CACHE PIP_CACHE_DIR NUGET_PACKAGES DOTNET_CLI_HOME CARGO_HOME GOMODCACHE GOCACHE XDG_CACHE_HOME
+        echo "Dir::Cache::archives \"$APT_CACHE_DIR\";" > /etc/apt/apt.conf.d/99gha-package-cache
+      fi
+      cd /opt/actions-runner
+      if [ ! -x ./config.sh ]; then
+        if [ -z "$RUNNER_ASSET_NAME" ] || [ -z "$RUNNER_DOWNLOAD_URL" ] || [ -z "$RUNNER_SHA256" ]; then
+          echo "runner bootstrap failed closed: pinned runner asset, URL, and sha256 are required" >&2
+          exit 70
+        fi
+        curl -fsSL -o "$RUNNER_ASSET_NAME" "$RUNNER_DOWNLOAD_URL"
+        printf '%s  %s\n' "$RUNNER_SHA256" "$RUNNER_ASSET_NAME" | sha256sum -c -
+        tar xzf "$RUNNER_ASSET_NAME"
+      fi
+      NAME="az-${RUNNER_BINDING}-$(hostname)"
+      ARGS=(--url "$RUNNER_URL" --token "$TOKEN" --name "$NAME" --labels "$RUNNER_LABELS" --unattended --replace)
+      if [ -n "$RUNNER_GROUP" ]; then
+        ARGS+=(--runnergroup "$RUNNER_GROUP")
+      fi
+      if [ "$RUNNER_EPHEMERAL" = "true" ]; then
+        ARGS+=(--ephemeral)
+      fi
+      ./config.sh "${ARGS[@]}"
+      ./run.sh
+runcmd:
+  - [ bash, -lc, 'mkdir -p /opt/github-actions-runners && chmod 755 /opt/github-actions-runners' ]
+  - [ bash, -lc, '/opt/github-actions-runners/bootstrap-runner.sh' ]
