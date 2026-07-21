@@ -72,7 +72,7 @@ find /var/lib/cloud/instances -type f \( -name user-data.txt -o -name user-data.
 rm -f -- "$0"
 
 cd "$RUNNER_ROOT"
-sudo -Eu "$RUNNER_USER" env ACTIONS_RUNNER_INPUT_JITCONFIG="$JIT_CONFIG" ./run.sh
+sudo -HEu "$RUNNER_USER" env ACTIONS_RUNNER_INPUT_JITCONFIG="$JIT_CONFIG" ./run.sh
 `, shellQuote(c.RunnerUser), shellQuote(asset), shellQuote(download), shellQuote(jitEnvelope), shellQuote(c.RunnerSHA256))
 
 	return "#cloud-config\n" +

@@ -83,6 +83,7 @@ func TestCloudInitProtectsJITAndPowersOff(t *testing.T) {
 		"systemctl enable --now docker",
 		"find /var/lib/cloud/instances",
 		"rm -f -- \"$0\"",
+		"sudo -HEu \"$RUNNER_USER\"",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("embedded script missing %q", expected)

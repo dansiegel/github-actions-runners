@@ -10,7 +10,7 @@ Controller unit tests cover:
 - busy runners survive queue-driven scale-down and are removed after `JobCompleted`;
 - stopped orphan VMs are reconciled;
 - Azure VM payloads use the managed image and contain no managed identity;
-- JIT data is envelope-encoded, cloud-init launches through the JIT environment, and the VM powers off on exit.
+- JIT data is envelope-encoded, cloud-init launches with the runner account's home directory and JIT environment, and the VM powers off on exit.
 
 Run with the pinned toolchain:
 
