@@ -185,6 +185,7 @@ resource runnerLifecycleRole 'Microsoft.Authorization/roleDefinitions@2022-04-01
           'Microsoft.Network/networkInterfaces/read'
           'Microsoft.Network/networkInterfaces/write'
           'Microsoft.Network/networkInterfaces/delete'
+          'Microsoft.Network/networkInterfaces/join/action'
           'Microsoft.Network/publicIPAddresses/read'
           'Microsoft.Network/publicIPAddresses/write'
           'Microsoft.Network/publicIPAddresses/delete'
