@@ -53,6 +53,12 @@ bash -n scripts/destroy-azure.sh
 bash -n image/scripts/install-runner-toolchain.sh
 ```
 
+The Packer build aliases the Canonical package installation to
+`/usr/share/dotnet`, then creates and removes a probe directory there as the
+`actions-runner` account. This makes reuse of the baked SDK and compatibility
+with the default Linux install directory used by `actions/setup-dotnet` image-
+build invariants.
+
 ## Live smoke test
 
 Automated local tests do not prove Azure quota, GitHub App installation, runner-group access, or marketplace availability. Before migrating a production repository, run a temporary workflow:
@@ -66,6 +72,9 @@ jobs:
     runs-on: avp-linux
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
       - run: dotnet --list-sdks
       - run: node --version
       - run: docker version
@@ -100,6 +109,7 @@ The implementation is ready for repository migration only when:
 - controller image builds;
 - Bicep compiles without errors;
 - Packer validates;
+- the image-build write probe succeeds for `/usr/share/dotnet`;
 - phase-one and phase-two Azure deployments succeed;
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;

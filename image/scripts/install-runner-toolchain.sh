@@ -71,6 +71,34 @@ ln -s /opt/aspire/aspire /usr/local/bin/aspire
 id actions-runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash actions-runner
 usermod -aG docker actions-runner
 install -d -o actions-runner -g actions-runner /opt/actions-runner
+
+# Canonical installs .NET under /usr/lib, while actions/setup-dotnet uses
+# /usr/share/dotnet by default on Linux. Alias the action's default to the
+# baked installation so matching SDKs are reused instead of downloaded again.
+dotnet_install_dir=/usr/share/dotnet
+dotnet_root="$(dirname "$(readlink -f "$(command -v dotnet)")")"
+if [[ ! -e "$dotnet_install_dir" ]]; then
+  ln -s "$dotnet_root" "$dotnet_install_dir"
+fi
+dotnet_install_root="$(readlink -f "$dotnet_install_dir")"
+if [[ "$dotnet_install_root" != "$dotnet_root" ]]; then
+  printf 'Expected %s to resolve to the baked .NET root %s, but found %s\n' \
+    "$dotnet_install_dir" "$dotnet_root" "$dotnet_install_root" >&2
+  exit 1
+fi
+
+# Give the single-use runner account access to extend that installation while
+# retaining a dedicated group instead of making it world-writable.
+chgrp -R actions-runner "$dotnet_install_root"
+chmod -R g+rwX "$dotnet_install_root"
+find "$dotnet_install_root" -type d -exec chmod g+s {} +
+
+# Fail the image build if a packaging or permission change would make
+# actions/setup-dotnet unusable by the unprivileged runner account.
+dotnet_write_probe="$dotnet_install_dir/.runner-write-probe"
+runuser --user actions-runner -- mkdir "$dotnet_write_probe"
+rmdir "$dotnet_write_probe"
+
 runner_asset="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 runner_url="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${runner_asset}"
 curl --fail --show-error --silent --location "$runner_url" -o "/tmp/${runner_asset}"
