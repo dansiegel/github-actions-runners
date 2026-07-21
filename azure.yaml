@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: github-actions-runners
+resourceGroup: ${AZURE_RESOURCE_GROUP}
+metadata:
+  template: github-actions-runners@0.1.0
+infra:
+  provider: bicep
+  path: infra
+  module: main

@@ -1,44 +1,74 @@
 # Security
 
-## Private-first enforcement
+## Trust model
 
-`visibility: public` on any user or organization account is rejected unless `publicVisibilityOptIn` includes an explicit reviewed approval. This keeps the initial artifact private while preserving a reviewed path to open it later.
+These runners execute repository-controlled code with Docker access. Membership in the `avp-linux` runner group is therefore equivalent to access to a short-lived privileged Linux host and its network path.
 
-## Secret handling
+Use this pool only for AvantiPoint private/internal repositories whose workflows and pull-request policies are trusted. Do not grant public repositories or untrusted fork pull requests access without a separate threat review and isolation design.
 
-Do not commit GitHub tokens, Azure secrets, tenant IDs, subscription IDs, private repo names, certificates, or private keys. Runner registration uses a token provider reference:
+## Credential boundaries
 
-- `command`: VM-executable command/script returns a short-lived registration token. Live apply requires `vmCredentialSource.type: managedIdentityGitHubApp` so the VM uses managed identity and Key Vault for GitHub App material instead of relying on an operator environment variable.
-- `env`: runtime environment variable supplies the token. Schema-valid, but rejected for live apply until a VM-safe source exists.
-- `keyVault`: Azure Key Vault lookup supplies the token. Schema-valid, but rejected for live apply until translated into a managed identity VM contract.
+| Principal | GitHub App secrets | Azure resource permissions | Workflow access |
+|---|---:|---:|---:|
+| Container App controller identity | Key Vault Secrets User | Custom VM/disk/NIC/public-IP lifecycle role in one resource group; ACR pull | No workflow code runs here |
+| Ephemeral runner VM | None | None; no managed identity is attached | Executes one job |
+| Deployment operator | Writes Key Vault secrets and deploys infrastructure | Deployment-time privileges | Does not inject credentials into VM custom data |
 
-Token providers run with this per-binding context and must write only the short-lived GitHub Actions registration token to stdout:
+The previous pattern—giving runner VMs Key Vault access so they could obtain registration tokens—is removed. Workflow code cannot query Azure IMDS for a privileged runner identity because no identity is assigned.
 
-- `GHA_REGISTRATION_TOKEN_ENDPOINT`: repo/org REST endpoint to POST for a registration token
-- `GHA_RUNNER_URL`: runner configuration URL used by `config.sh`
-- `GHA_RUNNER_SCOPE`: repository or organization
-- `GHA_BINDING_NAME`: local sanitized binding name
-- `GHA_TARGET_KIND`, `GHA_TARGET_OWNER`, `GHA_TARGET_REPOSITORY`: target metadata for auditing or provider routing
+## GitHub registration
 
-The committed example uses `scripts/github-runner-token.example.sh`, which is designed for execution on the VM. It uses managed identity to read GitHub App id, private key, and installation id from Key Vault, exchanges them for a GitHub App installation access token, and outputs only the short-lived runner registration token. Live apply validates the declared VM credential-source fields before Azure mutation; a command provider that only depends on local `GITHUB_TOKEN` is rejected.
+- GitHub App authentication is preferred over a PAT.
+- The scale-set client is pinned to v0.4.0.
+- Each runner uses a unique one-time JIT configuration.
+- The JIT value is base64-enveloped in Azure custom data and consumed before workflow code starts.
+- Cloud-init deletes its local user-data copies before launching the runner.
+- The VM and disk are destroyed after one job, preventing cross-job persistence.
 
-## Live apply guardrails
+A job running as the runner user may inspect its process tree or Azure instance metadata. The consumed JIT value must still be treated as sensitive, but it cannot be reused to mint other runners or access the GitHub App key.
 
-Before any paid Azure mutation, apply requires:
+## Azure permissions
 
-- `--confirm-spend I_ACCEPT_AZURE_SPEND`
-- configured tenant/subscription resolved from config or env
-- active `az account show` tenant/subscription equals configured values
-- resource-group-scoped deployment identity in config
-- all runner bindings include URL, token endpoint, token provider inputs, and VM credential-source prerequisites for VM-executable command providers
-- command providers declare and resolve `managedIdentityGitHubApp` prerequisites; env providers, direct Key Vault providers, and command providers without a VM credential source are rejected before Azure mutation
+The controller's custom role permits only:
 
-The code checks these before running Azure mutation commands.
+- VM read/write/delete and instance view
+- managed disk read/write/delete
+- NIC and public IP read/write/delete
+- subnet and public-IP join actions
+- resource-group read
 
-## Least privilege identity
+It cannot create role assignments, read Key Vault data through that role, or manage unrelated resource types. Separate built-in assignments grant Key Vault secret reads and ACR image pulls.
 
-Use a deployment identity scoped to the configured resource group. It should have only the permissions needed for resource group deployments, VMSS, network, and managed identity resources in that group. Do not use owner-level credentials for routine apply.
+Runner resources are tagged so reconciliation and audit queries stay scoped to resources created by the controller.
 
-## Fail-closed bootstrap
+## Network
 
-The generated cloud-init exits non-zero when runner URL or token provider output is missing. This prevents silent idle hosts that never register as runners.
+- The runner subnet NSG explicitly denies Internet ingress.
+- No SSH ingress rule is created even though a recovery public key is embedded.
+- Standard public IPs are used only for outbound connectivity and deleted with the runner.
+- There is no fixed-cost NAT Gateway.
+- GitHub, package registries, and arbitrary workflow destinations remain reachable outbound.
+
+If outbound allow-listing or data-exfiltration controls are required, route the subnet through an approved firewall/proxy and update the cost model.
+
+## Docker
+
+Membership in the Docker group is effectively root access on the ephemeral VM. This is necessary for Docker actions, service containers, image builds, and Testcontainers. The mitigation is host-level ephemerality and the absence of Azure/GitHub controller credentials—not an assumption that Docker itself is a sandbox.
+
+## Supply chain
+
+The Actions runner archive is pinned to a version and SHA-256. Aspire CLI is version-pinned. Ubuntu, Docker, NodeSource, Azure CLI, `azd`, and PowerShell packages resolve from their stable signed feeds at image-build time; their resolved versions are captured in `/opt/runner-image/manifest.txt`.
+
+For stricter reproducibility, mirror and pin every package in an internal feed, verify installer-script hashes, scan the managed image, and sign an image provenance record before production rollout.
+
+## Logging and incident response
+
+Controller logs go to Log Analytics. Runner bootstrap and runner diagnostic tails are written to the serial console and captured by managed boot diagnostics. GitHub retains workflow job logs.
+
+On suspected runner compromise:
+
+1. Remove repository access from the runner group.
+2. Suspend the controller.
+3. Preserve relevant GitHub and Azure logs before deleting resources.
+4. Rotate any workflow-accessible credentials used by the affected repository.
+5. Rebuild the managed image and redeploy before restoring access.

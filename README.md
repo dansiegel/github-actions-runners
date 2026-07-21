@@ -1,62 +1,105 @@
-# github-actions-runners
+# Ephemeral GitHub Actions runners on Azure
 
-Azure-first deployment baseline for self-hosted GitHub Actions runners.
+This repository deploys an organization-level GitHub runner scale set for **AvantiPoint** in Azure subscription `d901cbec-f20d-4272-a0b4-9ee06b850880`.
 
-Status: private-first scaffold, designed so the project can be opened later after review. Dry-run commands are safe by default. Live Azure apply/destroy requires explicit approval, configured tenant/subscription match, spend confirmation, and complete runner registration inputs.
+The supported pool is `avp-linux`:
 
-## Defaults
+- scales from **0 to 20** `Standard_D2s_v5` runner VMs from GitHub's live assigned-job count;
+- creates a clean Azure VM with a one-time GitHub JIT configuration for every job;
+- powers the VM off when the job ends and deletes the VM, OS disk, NIC, and public IP;
+- preinstalls .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire CLI in a reusable managed image;
+- keeps GitHub App and Azure lifecycle credentials in the controller only—runner VMs have no managed identity or Key Vault access.
 
-- Azure region: `eastus`
-- Total runner cap: `20`
-- Public IP: disabled by default
-- Runner mode: ephemeral by default
-- Azure image: `Ubuntu2404` (Ubuntu 24.04 LTS) by default
-- V1 Linux labels: `sh-linux` and `sh-linux-lg` in the example label family; reserve `sh-linux-max` for larger pools when added.
-- Topology: one VM Scale Set and cloud-init bootstrap per repo/org registration binding
-- Scaling mode: fixed-capacity v1. `minRunners` and `idleTimeoutMinutes` are accepted as documented intent, but no dynamic reconcile loop is implemented yet.
-- Shared package cache: enabled by default only for private trusted runner bindings at `/mnt/actions-cache/packages` for apt, npm, NuGet, pip, Cargo, and Go cache directories; owned by `actions-runner:actions-runner`, sized at 20 GiB, and pruned for files older than 14 days during bootstrap. Public/untrusted bindings fail closed unless the specific shared-cache trust risk is separately reviewed in `publicVisibilityOptIn.sharedPackageCacheRisk`, or the cache is disabled.
+Only a 0.25-vCPU / 0.5-GiB Container Apps controller and low-cost control-plane resources remain when no jobs are running. There is no always-on runner VM and no NAT Gateway.
 
-## Quick start
+## How it works
 
-```bash
-cp config/runners.example.yaml config/runners.yaml
-./scripts/validate-config.sh --config config/runners.yaml
-./scripts/render-plan.sh --config config/runners.yaml --out artifacts/plan.json
-./scripts/deploy-azure.sh --config config/runners.yaml --dry-run
-./scripts/destroy-azure.sh --config config/runners.yaml --dry-run
+```mermaid
+flowchart LR
+    G["GitHub workflow<br/>runs-on: avp-linux"] --> S["GitHub runner scale set<br/>assigned-job count"]
+    S --> C["Container Apps controller<br/>1 small replica"]
+    C -->|"Generate one-time JIT config"| G
+    C -->|"0..20"| V["Ephemeral Azure VMs<br/>prebuilt toolchain image"]
+    V -->|"one job"| G
+    G -->|"JobCompleted"| C
+    C -->|"delete VM + disk + NIC + IP"| V
+    K["Key Vault<br/>GitHub App secrets"] --> C
 ```
 
-Render one bootstrap file for review:
+The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/actions/scaleset) client, not delayed workflow webhooks. It reports a hard maximum of 20 to GitHub and scales from `statistics.TotalAssignedJobs`, which includes queued and running work.
 
-```bash
-./scripts/render-cloud-init.sh --config config/runners.yaml --binding repo-example-user-repo-one --output /tmp/cloud-init.yaml
+## Prerequisites
+
+- Azure CLI and Azure Developer CLI (`azd`)
+- Packer 1.15.4 or newer
+- permissions to create resources, custom roles, and role assignments in the target subscription/resource group
+- an SSH public key
+- a GitHub App installed on AvantiPoint with **Organization self-hosted runners: Read and write**
+
+Capture the GitHub App client ID (or numeric App ID), installation ID, and a private key PEM.
+
+## Deploy
+
+The script is dry-run by default and requires the exact subscription ID before mutation.
+
+PowerShell:
+
+```powershell
+./scripts/deploy-azure.ps1 -Mode Apply `
+  -BootstrapOnly `
+  -ConfirmSubscription d901cbec-f20d-4272-a0b4-9ee06b850880
 ```
 
-## Live Azure gates
-
-Live apply is intentionally guarded:
+Bash:
 
 ```bash
-./scripts/deploy-azure.sh --config config/runners.yaml --apply --confirm-spend I_ACCEPT_AZURE_SPEND
+./scripts/deploy-azure.sh --apply --bootstrap-only \
+  --confirm-subscription d901cbec-f20d-4272-a0b4-9ee06b850880
 ```
 
-Before any paid Azure mutation, the tool validates:
+Bootstrap creates the resource group, VNet/NSG, ACR, Key Vault, log workspace, Container Apps environment, controller identity, and least-privilege roles. It creates no runner VM.
 
-1. `defaults.azure.tenantId` and `defaults.azure.subscriptionId` resolve from config/env.
-2. Active `az account show` tenant/subscription matches the configured values before any token minting.
-3. `defaults.azure.deploymentIdentity.scope` is `resourceGroup` for the configured resource group.
-4. Every runner binding has `registration.runnerUrl` and a token provider contract that is executable in the VM environment.
-5. Command token providers declare `vmCredentialSource.type: managedIdentityGitHubApp`; live apply validates the VM-side Key Vault/GitHub App prerequisites resolve before any Azure mutation. Env, direct Key Vault, and local `GITHUB_TOKEN`-only command providers fail live apply until translated into a VM-available mechanism.
-6. Runner downloads use a pinned `defaults.github.runnerRelease.version` and per-asset sha256 for `linux-x64` and `linux-arm64`.
-7. Runner pool architecture matches the Azure VM size family; arm64 uses Dpsv5/Dpdsv5/Dplsv5/Dpldsv5 sizes such as `Standard_D2ps_v5`, not x64 Dsv5 sizes such as `Standard_D2s_v5`.
-8. The rendered plan and cloud-init include the shared package cache contract, including root path, package-manager environment variables, ownership, and prune/sizing controls.
-
-Destroy is also guarded:
+Add the GitHub App values to the output Key Vault:
 
 ```bash
-./scripts/destroy-azure.sh --config config/runners.yaml --apply --confirm-resource-group gha-runners-dev --confirm-spend I_ACCEPT_AZURE_SPEND
+VAULT_NAME="$(azd env get-value GITHUB_APP_KEY_VAULT_NAME)"
+az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-client-id --value '<client-id>'
+az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-installation-id --value '<installation-id>'
+az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-private-key --file '/secure/path/app.private-key.pem'
 ```
 
-## Private-first policy
+Then run the same deployment command without `--bootstrap-only` / `-BootstrapOnly`. It builds the managed runner image, builds the controller in ACR, enables the controller, and creates or adopts the GitHub logical scale set.
 
-Accounts default to private. `visibility: public` is rejected unless `publicVisibilityOptIn` records a reviewed approval. That public-visibility approval does not approve shared writable package cache state. Public/untrusted accounts must either set `defaults.sharedPackageCache.enabled: false` or record a separate `publicVisibilityOptIn.sharedPackageCacheRisk` review with `allowSharedPackageCache: true`, `reviewedBy`, `reviewedAt`, and `reason`. Do not commit tokens, tenant IDs, subscription IDs, resource IDs, or private repo names.
+To reuse an already validated managed image, pass its resource ID with `-RunnerImageId` (PowerShell) or `--runner-image-id` (Bash). The script verifies that the exact resource exists before using it.
+
+Before migrating workflows, grant the runner group access only to the intended private or internal repositories. Change their runner selection to:
+
+```yaml
+runs-on: avp-linux
+```
+
+See [workflow migration](docs/migration.md) and [operations](docs/operations.md) for rollout and verification.
+
+## Verify locally
+
+```powershell
+docker run --rm -v "${PWD}/controller:/src" -w /src golang:1.25.7-alpine go test ./...
+az bicep build --file infra/main.bicep --stdout | Out-Null
+packer init image/runner.pkr.hcl
+packer validate `
+  -var subscription_id=d901cbec-f20d-4272-a0b4-9ee06b850880 `
+  -var resource_group_name=gha-runners-prod `
+  -var managed_image_name=validation-only `
+  image/runner.pkr.hcl
+```
+
+The deployment itself is not run by tests. A live smoke workflow is required before changing production repository defaults.
+
+## Design documents
+
+- [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Operations](docs/operations.md)
+- [Security](docs/security.md)
+- [Testing](docs/testing.md)
+- [Workflow migration](docs/migration.md)

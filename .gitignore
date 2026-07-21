@@ -1,6 +1,7 @@
 # Local/private config
 config/runners.yaml
 config/*.local.yaml
+.azure/
 .env
 .env.*
 *.env

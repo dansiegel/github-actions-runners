@@ -1,53 +1,60 @@
 # Architecture
 
-## Scope
+## Decision
 
-This artifact plans Azure VM Scale Set based GitHub Actions runners for 1:N personal-account repositories and 1:N GitHub organizations.
+Use GitHub's runner-scale-set message protocol with standalone ephemeral Azure VMs.
 
-## Topology
+This is intentionally not Azure Container Apps Jobs: those jobs do not support privileged containers or Docker commands, while the target build workloads require Docker and Testcontainers. It is also not a Uniform VMSS with Azure Monitor autoscale: VMSS metric scaling cannot safely associate a unique GitHub JIT configuration with each instance or guarantee that scale-in will not remove a busy runner.
 
-The deployment unit is a runner binding, not a generic pool. Each enabled repository or organization runner binding gets its own VMSS and rendered cloud-init file:
+## Components
 
-- Repository binding: one VMSS registers to one `https://github.com/{owner}/{repo}` URL.
-- Organization binding: one VMSS registers to `https://github.com/{org}` and relies on the configured runner group plus repository allow-list.
+| Component | Idle state | Responsibility |
+|---|---:|---|
+| GitHub logical runner scale set `avp-linux` | No cost | Job routing, assigned-job statistics, JIT runner configurations, lifecycle events |
+| Container App controller | 1 × 0.25 vCPU / 0.5 GiB | Long-polls GitHub, provisions and deletes Azure resources, reconciles orphans |
+| Ephemeral Azure VMs | 0 | Execute exactly one job each; hard cap 20 |
+| Managed runner image | Stored | Reusable .NET 10 / Node 24 / Docker build toolchain |
+| ACR | Basic | Stores the controller image |
+| Key Vault | Empty of runner data | Stores only GitHub App controller credentials |
+| VNet + runner subnet + NSG | No metered gateway | Denies Internet ingress to runner public IPs |
+| Log Analytics | Usage based | Stores controller logs |
 
-This avoids pool-only VMSS behavior that cannot prove repo/org-scoped registration. Pools remain templates for image, size, labels, and defaults. The V1 Linux baseline uses Ubuntu 24.04 LTS via Azure CLI image alias `Ubuntu2404` and the `sh-linux` label family. Target bindings set capacity so the sum can be capped by `defaults.totalRunnerCap`.
+## Scaling contract
 
-## GitHub registration boundary
+1. The controller creates or adopts the organization runner scale set.
+2. The listener advertises `MAX_RUNNERS=20` to GitHub in `X-ScaleSetMaxCapacity`.
+3. GitHub returns `TotalAssignedJobs`, which represents waiting plus running jobs.
+4. Target VM count is `min(20, TotalAssignedJobs)`; `MIN_RUNNERS` is validated to exactly zero.
+5. Every new runner gets a unique JIT configuration and Azure VM.
+6. A `JobStarted` event protects the VM as busy.
+7. A `JobCompleted` event starts deletion. The VM also powers off when `run.sh` exits.
+8. The one-minute reconciler deletes stopped/deallocated VMs and hard-expired VMs. This catches controller outages and missed cleanup.
 
-Every binding must define:
+The controller never deletes a busy runner merely because desired capacity falls. Queue-driven scale-down only removes runners still known to be idle; completed runners follow the job-completion path.
 
-- `registration.runnerUrl`
-- token provider type: `command`, `env`, or `keyVault`
-- labels inherited from the pool plus required labels: `self-hosted`, `azure`, OS, arch, pool name such as `sh-linux` or `sh-linux-lg`
-- repository scope or organization scope
-- repository allow-list for organization runners
+## Restart behavior
 
-No token value is committed. For live apply, command token provider scripts are embedded into cloud-init and executed from `/usr/local/bin` on the VM with per-binding `GHA_*` context plus the declared `managedIdentityGitHubApp` credential source. The VM obtains Key Vault access through managed identity, reads GitHub App material from named Key Vault secrets, exchanges it for an installation access token, and requests a short-lived runner registration token. Env and direct Key Vault provider modes fail closed before Azure mutation until a VM-available mechanism is implemented. If URL, token provider contract, VM credential prerequisites, or token provider output is missing, bootstrap exits non-zero and fails closed.
+Azure VM tags are the durable inventory:
 
-Runner bootstrap uses the pinned GitHub Actions runner release and sha256 values from config, so `linux-x64` and `linux-arm64` pools render their matching archive names and verify integrity before extraction. Pool architecture must also match the Azure VM size family: x64 pools use Dsv5/Ddsv5 sizes and arm64 pools use Dpsv5/Dpdsv5/Dplsv5/Dpldsv5 sizes. This prevents rendering an arm64 runner asset onto an x64 VM size such as `Standard_D2s_v5`.
+- `managed-by=gha-runner-scale-controller`
+- `runner-scale-set=avp-linux`
+- `github-runner-name=<JIT runner name>`
+- `runner-created-at=<UTC timestamp>`
 
-## Azure boundary
+After a controller restart, tagged VMs are adopted as `unknown` and protected from ordinary scale-down. Job events restore known state. A stopped VM or a VM older than the 12-hour hard limit is deleted by reconciliation. This favors job safety during a restart while still bounding orphan cost.
 
-Dry-run renders plan JSON only. Live apply validates tenant/subscription against active `az account show` before running mutation commands. The configured deployment identity must be scoped to the target resource group.
+## Networking
 
+Each active VM receives a Standard public IP for outbound connectivity. The runner-subnet NSG denies all Internet ingress, and no SSH rule is opened. Per-runner public IPs are deleted with the VM.
 
-## Shared package cache
+This avoids a dedicated NAT Gateway's fixed hourly charge at the current workload level. If a stable outbound IP becomes mandatory, add a shared approved egress path and reassess the fixed-cost tradeoff.
 
-V1 includes a VM-local shared package cache for job dependencies. The rendered plan records the default contract once at `sharedPackageCache` and again per runner binding. Cloud-init creates `/mnt/actions-cache/packages` and package-manager subdirectories for apt, npm, NuGet, pip, Cargo, and Go, then exports the corresponding environment variables before starting the GitHub Actions runner:
+## Images and caches
 
-- `NPM_CONFIG_CACHE=/mnt/actions-cache/packages/npm`
-- `PIP_CACHE_DIR=/mnt/actions-cache/packages/pip`
-- `NUGET_PACKAGES=/mnt/actions-cache/packages/nuget/packages`
-- `DOTNET_CLI_HOME=/mnt/actions-cache/packages/dotnet-home`
-- `CARGO_HOME=/mnt/actions-cache/packages/cargo`
-- `GOMODCACHE=/mnt/actions-cache/packages/go/pkg/mod`
-- `GOCACHE=/mnt/actions-cache/packages/go/build`
-- `XDG_CACHE_HOME=/mnt/actions-cache/packages/xdg`
-- apt archive cache points at `/mnt/actions-cache/packages/apt/archives`
+The Packer-managed image contains repeated build dependencies. Mutable package caches are not shared between repositories or jobs; every runner VM starts from the same immutable image and is destroyed after one job. GitHub Actions cache/artifact services remain the appropriate place for repository-specific dependency caching.
 
-The cache is intentionally VM-local, not a cross-VM Azure Files or blob mount, to avoid V1 credential, locking, and spend complexity. It is shared across jobs that land on the same VM and persists until the VM is reimaged or destroyed. Bootstrap owns it as `actions-runner:actions-runner`, targets 20 GiB, deletes files older than 14 days, and performs an additional older-than-7-days prune if the size target is exceeded.
+The marketplace-image fallback exists for recovery, but it installs Docker and the runner at boot and will be substantially slower than the managed image.
 
-## Scaling
+## Capacity assumptions
 
-Version 1 is fixed-capacity. `minRunners` and `idleTimeoutMinutes` are accepted to keep the schema forward-compatible, but no dynamic scaling or idle reconcile loop is implemented in this artifact.
+The default `Standard_D2s_v5` runner consumes two regional vCPUs. A full 20-runner burst therefore requires at least 40 available Dsv5-family vCPUs plus headroom. Azure quota and regional SKU availability must be verified before production migration.

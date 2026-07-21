@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
-set -euo pipefail
-CONFIG="config/runners.yaml"
+set -Eeuo pipefail
+
+SUBSCRIPTION_ID="d901cbec-f20d-4272-a0b4-9ee06b850880"
+RESOURCE_GROUP="gha-runners-prod"
 MODE="dry-run"
-CONFIRM_RG=""
-CONFIRM_SPEND=""
-while [ $# -gt 0 ]; do
+CONFIRM_SUBSCRIPTION=""
+CONFIRM_RESOURCE_GROUP=""
+
+while [[ $# -gt 0 ]]; do
   case "$1" in
-    --config) CONFIG="$2"; shift 2 ;;
     --dry-run) MODE="dry-run"; shift ;;
     --apply) MODE="apply"; shift ;;
-    --confirm-resource-group) CONFIRM_RG="$2"; shift 2 ;;
-    --confirm-spend) CONFIRM_SPEND="$2"; shift 2 ;;
-    -h|--help) echo "usage: $0 [--config path] [--dry-run|--apply] --confirm-resource-group name [--confirm-spend I_ACCEPT_AZURE_SPEND]"; exit 0 ;;
+    --resource-group) RESOURCE_GROUP="$2"; shift 2 ;;
+    --confirm-subscription) CONFIRM_SUBSCRIPTION="$2"; shift 2 ;;
+    --confirm-resource-group) CONFIRM_RESOURCE_GROUP="$2"; shift 2 ;;
+    -h|--help)
+      echo "usage: $0 [--dry-run|--apply] [--resource-group name] --confirm-subscription id --confirm-resource-group name"
+      exit 0
+      ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-mkdir -p .plan
-python tools/runner_config.py azure-plan --config "$CONFIG" | tee .plan/destroy-plan.json >/dev/null
-RG=$(python - "$CONFIG" <<'PY'
-import sys
-from tools.runner_config import load_config, normalize_config
-cfg,_ = normalize_config(load_config(sys.argv[1]))
-print(cfg['defaults']['azure']['resourceGroup'])
-PY
-)
-if [ "$MODE" = "apply" ]; then
-  if [ -z "$CONFIRM_RG" ]; then
-    echo "--confirm-resource-group $RG is required for destroy apply" >&2
-    exit 2
-  fi
-  python tools/runner_config.py destroy-azure --config "$CONFIG" --confirm-resource-group "$CONFIRM_RG" --confirm-spend "$CONFIRM_SPEND"
-else
-  echo "dry-run only: would delete Azure resource group $RG and contained runner resources"
-  echo "no Azure mutation command was executed"
-  echo "rerun with --apply --confirm-resource-group $RG --confirm-spend I_ACCEPT_AZURE_SPEND only after approval"
+
+echo "Would delete resource group $RESOURCE_GROUP from subscription $SUBSCRIPTION_ID."
+echo "Key Vault purge protection can leave the vault name unavailable after resource-group deletion."
+if [[ "$MODE" != "apply" ]]; then
+  echo "Dry run only. Nothing was deleted."
+  exit 0
 fi
+if [[ "$CONFIRM_SUBSCRIPTION" != "$SUBSCRIPTION_ID" ]]; then
+  echo "--confirm-subscription must exactly equal $SUBSCRIPTION_ID" >&2
+  exit 2
+fi
+if [[ "$CONFIRM_RESOURCE_GROUP" != "$RESOURCE_GROUP" ]]; then
+  echo "--confirm-resource-group must exactly equal $RESOURCE_GROUP" >&2
+  exit 2
+fi
+
+az account set --subscription "$SUBSCRIPTION_ID"
+ACTUAL_ID="$(az group show --name "$RESOURCE_GROUP" --query id --output tsv)"
+EXPECTED_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+if [[ "${ACTUAL_ID,,}" != "${EXPECTED_ID,,}" ]]; then
+  echo "Resolved resource group did not match expected ID; refusing deletion" >&2
+  exit 2
+fi
+az group delete --name "$RESOURCE_GROUP" --subscription "$SUBSCRIPTION_ID" --yes --no-wait
+echo "Deletion requested for exactly $EXPECTED_ID"
