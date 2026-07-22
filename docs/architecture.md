@@ -12,7 +12,7 @@ This is intentionally not Azure Container Apps Jobs: those jobs do not support p
 |---|---:|---|
 | GitHub logical runner scale set `avp-linux` | No cost | Job routing, assigned-job statistics, JIT runner configurations, lifecycle events |
 | Container App controller | 1 × 0.25 vCPU / 0.5 GiB | Long-polls GitHub, provisions and deletes Azure resources, reconciles orphans |
-| Ephemeral Azure VMs | 0 | Execute exactly one job each; hard cap 20 |
+| Ephemeral Azure VMs | 0 | Execute exactly one job each; deployed cap 12, controller ceiling 20 |
 | Managed runner image | Stored | Reusable .NET 10 / Node 24 / Docker build toolchain |
 | ACR | Basic | Stores the controller image |
 | Key Vault | Empty of runner data | Stores only GitHub App controller credentials |
@@ -22,9 +22,9 @@ This is intentionally not Azure Container Apps Jobs: those jobs do not support p
 ## Scaling contract
 
 1. The controller creates or adopts the organization runner scale set.
-2. The listener advertises `MAX_RUNNERS=20` to GitHub in `X-ScaleSetMaxCapacity`.
+2. The listener advertises the deployed `MAX_RUNNERS=12` to GitHub in `X-ScaleSetMaxCapacity`.
 3. GitHub returns `TotalAssignedJobs`, which represents waiting plus running jobs.
-4. Target VM count is `min(20, TotalAssignedJobs)`; `MIN_RUNNERS` is validated to exactly zero.
+4. Target VM count is `min(12, TotalAssignedJobs)`; `MIN_RUNNERS` is validated to exactly zero.
 5. Every new runner gets a unique JIT configuration and Azure VM.
 6. A `JobStarted` event protects the VM as busy.
 7. A `JobCompleted` event starts deletion. The VM also powers off when `run.sh` exits.
@@ -57,4 +57,4 @@ The marketplace-image fallback exists for recovery, but it installs Docker and t
 
 ## Capacity assumptions
 
-The default `Standard_D2s_v5` runner consumes two regional vCPUs. A full 20-runner burst therefore requires at least 40 available Dsv5-family vCPUs plus headroom. Azure quota and regional SKU availability must be verified before production migration.
+The default `Standard_D4s_v5` runner consumes four regional vCPUs and provides 16 GiB for concurrent .NET, Node.js, and Docker workloads. The deployed 12-runner burst consumes 48 of the subscription's 50 Dsv5-family vCPUs. Raising the controller to its supported ceiling of 20 requires at least 80 available Dsv5-family vCPUs plus headroom. Azure quota and regional SKU availability must be verified before increasing capacity.

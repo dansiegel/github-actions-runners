@@ -21,10 +21,10 @@ param runnerScaleSetName string = 'avp-linux'
 @description('Maximum concurrent ephemeral runner VMs. Runner compute is always allowed to return to zero.')
 @minValue(1)
 @maxValue(20)
-param maxRunners int = 20
+param maxRunners int = 12
 
 @description('Azure VM size used for each ephemeral runner.')
-param runnerVmSize string = 'Standard_D2s_v5'
+param runnerVmSize string = 'Standard_D4s_v5'
 
 @description('Optional managed image or Compute Gallery image version resource ID. Empty uses Ubuntu 24.04 and bootstraps at startup.')
 param runnerImageId string = ''

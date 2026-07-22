@@ -12,8 +12,8 @@
 | GitHub organization | `AvantiPoint` | GitHub App must be installed here |
 | Scale set / label | `avp-linux` | Use this exact value in `runs-on` |
 | Minimum runners | `0` | Controller rejects any other value |
-| Maximum runners | `20` | Enforced by Bicep and controller validation |
-| VM size | `Standard_D2s_v5` | 2 vCPU, 8 GiB, x64 |
+| Maximum runners | `12` | Fits the subscription's 50-vCPU Dsv5-family quota; controller ceiling is 20 |
+| VM size | `Standard_D4s_v5` | 4 vCPU, 16 GiB, x64 |
 | VM priority | `Regular` | `Spot` is supported but can evict jobs |
 | Idle timeout | 30 minutes | Only known-idle VMs; normal assignment should be much faster |
 | Hard VM lifetime | 12 hours | Cost guard for stuck/orphaned VMs |
@@ -67,7 +67,7 @@ The resolved versions are written to `/opt/runner-image/manifest.txt` in the ima
 
 ## Changing capacity
 
-Capacity can be reduced without code changes by setting `RUNNER_MAX_CAPACITY` to an integer from 1 through 20 and reprovisioning. The supported production ceiling is 20. A larger ceiling requires a code/config review, an Azure quota review, and revisiting the cost guard; do not simply bypass the validation.
+Capacity can be changed without code changes by setting `RUNNER_MAX_CAPACITY` to an integer from 1 through 20 and reprovisioning. The deployed default is 12 because 12 D4s v5 runners consume 48 of the subscription's 50 Dsv5-family vCPUs. Raising it requires quota headroom; the supported controller ceiling remains 20. A larger ceiling requires a code/config review, an Azure quota review, and revisiting the cost guard; do not simply bypass the validation.
 
 ## Spot runners
 

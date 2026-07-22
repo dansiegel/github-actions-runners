@@ -26,7 +26,7 @@ func validConfig() Config {
 		ResourceGroup:        "gha-runners-prod",
 		Location:             "eastus2",
 		SubnetID:             "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/runners",
-		VMSize:               "Standard_D2s_v5",
+		VMSize:               "Standard_D4s_v5",
 		VMAdminUser:          "azureuser",
 		VMSSHPublicKey:       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest runner@example",
 		VMPriority:           "Regular",

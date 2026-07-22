@@ -40,7 +40,7 @@ The runner process executes directly on the VM and belongs to the Docker group. 
 
 ## Capacity interaction
 
-All repositories granted access share one homogeneous pool with a combined maximum of 20 active VMs. GitHub assigns work according to runner-group access and queue state; there is no reserved quota per repository. If one repository must not consume all capacity, enforce workflow-level `concurrency` / matrix `max-parallel`, or introduce separately budgeted scale sets with an explicit global-cap design.
+All repositories granted access share one homogeneous pool with a deployed maximum of 12 active VMs. GitHub assigns work according to runner-group access and queue state; there is no reserved quota per repository. The controller supports up to 20 only after Azure quota is raised. If one repository must not consume all capacity, enforce workflow-level `concurrency` / matrix `max-parallel`, or introduce separately budgeted scale sets with an explicit global-cap design.
 
 ## Rollback
 

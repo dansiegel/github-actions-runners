@@ -59,7 +59,7 @@ func LoadConfig() (Config, error) {
 		ResourceGroup:   env("AZURE_RESOURCE_GROUP", ""),
 		Location:        env("AZURE_LOCATION", ""),
 		SubnetID:        env("RUNNER_SUBNET_ID", ""),
-		VMSize:          env("RUNNER_VM_SIZE", "Standard_D2s_v5"),
+		VMSize:          env("RUNNER_VM_SIZE", "Standard_D4s_v5"),
 		ImageID:         env("RUNNER_IMAGE_ID", ""),
 		VMAdminUser:     env("RUNNER_ADMIN_USERNAME", "azureuser"),
 		VMSSHPublicKey:  env("RUNNER_ADMIN_SSH_PUBLIC_KEY", ""),

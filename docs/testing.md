@@ -105,7 +105,7 @@ Verify the following lifecycle:
 
 ## Burst test
 
-Use a workflow-dispatch matrix of 20 short jobs only after quota is confirmed. Observe that no more than 20 runner VMs are created, then verify complete scale-to-zero. Do not run a paid burst merely to validate source changes; schedule it as a controlled acceptance test with an approved spend window.
+Use a workflow-dispatch matrix matching the deployed capacity only after quota is confirmed (12 jobs for this subscription). Observe that no more than the configured maximum is created, then verify complete scale-to-zero. Testing the controller ceiling of 20 requires at least 80 available Dsv5-family vCPUs. Do not run a paid burst merely to validate source changes; schedule it as a controlled acceptance test with an approved spend window.
 
 ## Completion requirements
 

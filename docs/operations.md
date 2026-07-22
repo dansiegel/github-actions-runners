@@ -30,7 +30,7 @@ az account show --query '{subscription:id,name:name,tenant:tenantId}' --output t
 az vm list-usage --location eastus2 --query "[?contains(localName, 'Total Regional') || contains(localName, 'DSv5')]" --output table
 ```
 
-A 20-runner burst of `Standard_D2s_v5` needs 40 vCPUs. Request quota before migration if the available limit is lower.
+A 12-runner burst of `Standard_D4s_v5` needs 48 vCPUs. The target subscription currently has a 50-vCPU Dsv5-family quota, so do not raise the deployed maximum without first increasing quota. The controller's supported ceiling of 20 would need at least 80 Dsv5-family vCPUs plus headroom.
 
 ## Observe the controller
 

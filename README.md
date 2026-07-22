@@ -4,7 +4,7 @@ This repository deploys an organization-level GitHub runner scale set for **Avan
 
 The supported pool is `avp-linux`:
 
-- scales from **0 to 20** `Standard_D2s_v5` runner VMs from GitHub's live assigned-job count;
+- scales from **0 to 12** `Standard_D4s_v5` runner VMs from GitHub's live assigned-job count;
 - creates a clean Azure VM with a one-time GitHub JIT configuration for every job;
 - powers the VM off when the job ends and deletes the VM, OS disk, NIC, and public IP;
 - preinstalls .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire CLI in a reusable managed image;
@@ -19,14 +19,14 @@ flowchart LR
     G["GitHub workflow<br/>runs-on: avp-linux"] --> S["GitHub runner scale set<br/>assigned-job count"]
     S --> C["Container Apps controller<br/>1 small replica"]
     C -->|"Generate one-time JIT config"| G
-    C -->|"0..20"| V["Ephemeral Azure VMs<br/>prebuilt toolchain image"]
+    C -->|"0..12"| V["Ephemeral Azure VMs<br/>prebuilt toolchain image"]
     V -->|"one job"| G
     G -->|"JobCompleted"| C
     C -->|"delete VM + disk + NIC + IP"| V
     K["Key Vault<br/>GitHub App secrets"] --> C
 ```
 
-The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/actions/scaleset) client, not delayed workflow webhooks. It reports a hard maximum of 20 to GitHub and scales from `statistics.TotalAssignedJobs`, which includes queued and running work.
+The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/actions/scaleset) client, not delayed workflow webhooks. It reports the deployed maximum of 12 to GitHub and scales from `statistics.TotalAssignedJobs`, which includes queued and running work. The controller supports up to 20 after the Dsv5-family quota is raised.
 
 ## Prerequisites
 

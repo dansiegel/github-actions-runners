@@ -36,7 +36,7 @@ Target subscription: $SUBSCRIPTION_ID
 Resource group:      $RESOURCE_GROUP
 Location:            $LOCATION
 Runner scale set:    avp-linux
-Runner capacity:     0 to 20 Standard_D2s_v5 VMs
+Runner capacity:     0 to 12 Standard_D4s_v5 VMs
 Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI, azd, PowerShell, Aspire
 EOF
 
@@ -73,8 +73,8 @@ azd env set ADMIN_SSH_PUBLIC_KEY "$(<"$SSH_PUBLIC_KEY_FILE")"
 azd env set GITHUB_ORGANIZATION "AvantiPoint"
 azd env set RUNNER_GROUP "default"
 azd env set RUNNER_SCALE_SET_NAME "avp-linux"
-azd env set RUNNER_MAX_CAPACITY "20"
-azd env set RUNNER_VM_SIZE "Standard_D2s_v5"
+azd env set RUNNER_MAX_CAPACITY "12"
+azd env set RUNNER_VM_SIZE "Standard_D4s_v5"
 azd env set RUNNER_VM_PRIORITY "Regular"
 azd env set RUNNER_IMAGE_ID "$EXISTING_RUNNER_IMAGE_ID"
 azd env set RUNNER_CONTROLLER_IMAGE ""
