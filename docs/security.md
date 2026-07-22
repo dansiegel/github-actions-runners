@@ -2,9 +2,9 @@
 
 ## Trust model
 
-These runners execute repository-controlled code with Docker access. Membership in the `avp-linux` runner group is therefore equivalent to access to a short-lived privileged Linux host and its network path.
+These runners execute repository-controlled code with Docker access. Access to any configured runner pool is therefore equivalent to access to a short-lived privileged Linux host and its network path.
 
-Use this pool only for AvantiPoint private/internal repositories whose workflows and pull-request policies are trusted. Do not grant public repositories or untrusted fork pull requests access without a separate threat review and isolation design.
+Use these pools only for trusted private/internal repositories whose workflows and pull-request policies are controlled. Do not grant public repositories or untrusted fork pull requests access without a separate threat review and isolation design.
 
 ## Credential boundaries
 

@@ -2,6 +2,9 @@
 param(
     [ValidateSet('DryRun', 'Apply')]
     [string] $Mode = 'DryRun',
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [string] $SubscriptionId,
     [string] $ResourceGroup = 'gha-runners-prod',
     [string] $ConfirmSubscription = '',
     [string] $ConfirmResourceGroup = ''
@@ -9,7 +12,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-$subscriptionId = 'd901cbec-f20d-4272-a0b4-9ee06b850880'
 Write-Host "Would delete resource group $ResourceGroup from subscription $subscriptionId."
 Write-Warning 'Key Vault purge protection can leave the vault name unavailable after resource-group deletion.'
 

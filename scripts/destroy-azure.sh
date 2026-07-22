@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SUBSCRIPTION_ID="d901cbec-f20d-4272-a0b4-9ee06b850880"
+SUBSCRIPTION_ID=""
 RESOURCE_GROUP="gha-runners-prod"
 MODE="dry-run"
 CONFIRM_SUBSCRIPTION=""
@@ -11,16 +11,22 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) MODE="dry-run"; shift ;;
     --apply) MODE="apply"; shift ;;
+    --subscription-id) SUBSCRIPTION_ID="$2"; shift 2 ;;
     --resource-group) RESOURCE_GROUP="$2"; shift 2 ;;
     --confirm-subscription) CONFIRM_SUBSCRIPTION="$2"; shift 2 ;;
     --confirm-resource-group) CONFIRM_RESOURCE_GROUP="$2"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--dry-run|--apply] [--resource-group name] --confirm-subscription id --confirm-resource-group name"
+      echo "usage: $0 --subscription-id id [--dry-run|--apply] [--resource-group name] --confirm-subscription id --confirm-resource-group name"
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ ! "$SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "--subscription-id must be an Azure subscription UUID" >&2
+  exit 2
+fi
 
 echo "Would delete resource group $RESOURCE_GROUP from subscription $SUBSCRIPTION_ID."
 echo "Key Vault purge protection can leave the vault name unavailable after resource-group deletion."

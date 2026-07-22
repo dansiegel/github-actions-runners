@@ -2,46 +2,59 @@
 
 ## Bootstrap and deploy
 
-1. Select the exact Azure subscription.
-2. Run the deployment script with bootstrap-only enabled.
-3. Add the three GitHub App secrets to the output Key Vault.
-4. Run the deployment script again without bootstrap-only.
-5. Grant the GitHub runner group access to the intended repositories.
-6. Run the smoke workflow before changing production workflow labels.
+1. Prepare a deployment-private runner-pool JSON file, or choose the single-pool command-line values.
+2. Select the exact Azure subscription and target GitHub organization.
+3. Run the deployment script with bootstrap-only enabled.
+4. Add the three GitHub App secrets to the output Key Vault.
+5. Run the deployment script again without bootstrap-only.
+6. Grant the GitHub runner group access to intended trusted repositories.
+7. Run a smoke workflow for each pool before changing production workflow labels.
 
-The deployment scripts refuse mutation unless the caller repeats subscription `d901cbec-f20d-4272-a0b4-9ee06b850880`. They create a new timestamped managed image and never delete an old image automatically.
+The deployment scripts refuse mutation unless the caller repeats the subscription passed through `-SubscriptionId` / `--subscription-id`. They create a new timestamped managed image and never delete an old image automatically.
 
 ## GitHub App setup
 
-Create a GitHub App owned by AvantiPoint with:
+Create a GitHub App owned by the target organization with:
 
 - Organization permissions → Self-hosted runners: Read and write
-- Installation target: AvantiPoint
-- Repository access: the repositories allowed to use the runner group
+- Installation target: the target organization
+- Repository access: repositories allowed to use the runner group
 
-No webhook is required; the controller long-polls the runner-scale-set message service.
+No webhook is required; each controller long-polls its runner-scale-set message service.
 
 ## Preflight
 
-Confirm the selected account and quota:
+Confirm selected account, region, and quota:
 
 ```bash
 az account show --query '{subscription:id,name:name,tenant:tenantId}' --output table
-az vm list-usage --location eastus2 --query "[?contains(localName, 'Total Regional') || contains(localName, 'DSv5')]" --output table
+az vm list-usage --location '<region>' --output table
+az vm list-skus --location '<region>' --resource-type virtualMachines --all --output table
 ```
 
-A 12-runner burst of `Standard_D4s_v5` needs 48 vCPUs. The target subscription currently has a 50-vCPU Dsv5-family quota, so do not raise the deployed maximum without first increasing quota. The controller's supported ceiling of 20 would need at least 80 Dsv5-family vCPUs plus headroom.
+Calculate peak demand across every pool. For example, eight D2s v5 runners plus four D4s v5 runners request 32 Dsv5-family vCPUs. Leave headroom for other Azure workloads and transient replacement operations.
 
-## Observe the controller
+## Observe controllers
+
+List all deployed pool controllers:
+
+```bash
+az containerapp list \
+  --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" \
+  --query "[?tags.purpose=='github-runner-scale-set-listener'].{name:name,pool:tags.'runner-scale-set',size:tags.'runner-vm-size',max:tags.'runner-max-capacity'}" \
+  --output table
+```
+
+Follow one pool's logs using the name returned above:
 
 ```bash
 az containerapp logs show \
-  --name "$(azd env get-value RUNNER_CONTROLLER_NAME)" \
+  --name '<controller-name>' \
   --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" \
   --follow
 ```
 
-Expected events include `Runner scale controller ready`, desired-capacity reconciliation, VM provisioning, job started/completed, and VM deletion.
+Expected events include `Runner scale controller ready`, desired-capacity reconciliation, VM provisioning, job started/completed, and VM deletion. Each event includes the scale-set context in its controller stream.
 
 ## Verify scale-to-zero
 
@@ -50,11 +63,11 @@ After all GitHub jobs finish, allow several minutes for Azure deletion operation
 ```bash
 az vm list \
   --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" \
-  --query "[?tags.'managed-by'=='gha-runner-scale-controller'].{name:name,runner:tags.'github-runner-name'}" \
+  --query "[?tags.'managed-by'=='gha-runner-scale-controller'].{name:name,pool:tags.'runner-scale-set',runner:tags.'github-runner-name'}" \
   --output table
 ```
 
-The result must be empty. Also verify there are no tagged NICs or public IPs:
+The result must be empty. Also verify no tagged NICs or public IPs remain:
 
 ```bash
 az resource list \
@@ -69,51 +82,65 @@ az resource list \
 - `JobCompleted` asynchronously deletes the VM, NIC, and public IP.
 - The OS disk and NIC are additionally configured with Azure `deleteOption=Delete`.
 - Runner bootstrap powers off the VM whenever the runner exits, including failure paths.
-- Reconciliation runs every minute and deletes stopped/deallocated VMs.
+- Reconciliation runs every minute and deletes stopped/deallocated VMs belonging to that pool.
 - A 12-hour hard lifetime limits the cost of a stuck runner.
 
 Do not manually delete a running VM unless the associated job is known to be abandoned. Ordinary scale-down deliberately protects busy and restart-unknown VMs.
 
+## Change or remove pools
+
+Pool order is stable infrastructure configuration. Pool zero preserves the original controller resource name for upgrade compatibility. Renaming pool zero updates that controller in place; reordering pools can move a controller to a different queue and should be treated as a controlled migration.
+
+Adding a pool is an ordinary reprovision. To retire a pool safely:
+
+1. Remove repository access to the pool or change every workflow away from its name.
+2. Let its jobs finish and verify no Azure VM has `runner-scale-set=<pool-name>`.
+3. Remove the pool from JSON and reprovision.
+4. Delete the obsolete Container App explicitly after resolving its name from the `runner-scale-set` tag.
+5. Delete the logical scale set in GitHub organization settings if it is no longer needed.
+
+Step 4 is explicit because ARM incremental deployments do not delete resources removed from a loop. Never delete a controller while its pool still has running VMs; it owns their reconciliation and cleanup.
+
 ## Suspend provisioning
 
-To stop accepting new jobs without deleting active runner VMs, first remove repository access from the GitHub runner group or change workflows away from `avp-linux`. Then scale the controller down:
+First remove repository access or change workflows away from the target pool. Then scale only its controller down:
 
 ```bash
 az containerapp update \
-  --name "$(azd env get-value RUNNER_CONTROLLER_NAME)" \
+  --name '<controller-name>' \
   --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" \
   --min-replicas 0 \
   --max-replicas 0
 ```
 
-Restore the Bicep-declared one-replica controller with `azd provision`. While the controller is suspended, finished VMs power off but are not reconciled/deleted until it returns.
+Restore the Bicep-declared one-replica controller with `azd provision`. While it is suspended, finished VMs power off but are not reconciled/deleted until it returns.
 
 ## Rotate the GitHub App key
 
 1. Generate a new private key in GitHub App settings.
 2. Update `github-app-private-key` in Key Vault using `az keyvault secret set --file`.
-3. Restart the Container App revision.
-4. Verify the listener creates a message session.
+3. Reprovision or restart every controller revision.
+4. Verify every listener creates a message session.
 5. Revoke the old key in GitHub.
 
 ## Refresh the runner image
 
-Rerun the full deployment script. It builds a timestamped managed image, points the controller at its resource ID, and rolls the Container App revision. Existing jobs continue on the old image; only newly created VMs use the new image.
+Rerun the full deployment script. It builds one timestamped managed image, points every controller at its resource ID, and rolls the Container App revisions. Existing jobs continue on the old image; only newly created VMs use the new image.
 
-After no VMs reference an old managed image, list it and delete it explicitly if desired. Image deletion is intentionally not automated because it is destructive.
+After no VMs reference an old managed image, list and delete it explicitly if desired. Image deletion is intentionally not automated because it is destructive.
 
 ## Common failures
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Jobs stay queued and no VM appears | Controller stopped, runner-group access missing, or GitHub App permission missing | Inspect controller logs and GitHub runner group |
-| VM creation returns quota/capacity error | Insufficient regional/Dsv5 quota or SKU capacity | Request quota or select an approved region/SKU |
+| Jobs stay queued and no VM appears | Pool controller stopped, runner-group access missing, wrong `runs-on`, or GitHub App permission missing | Inspect the controller tagged for that pool and GitHub runner group |
+| VM creation returns quota/capacity error | Combined pool capacity exceeds regional/family quota or SKU capacity | Reduce a pool, request quota, or select an approved region/SKU |
 | VM exists but runner never becomes online | Image/bootstrap failure or GitHub connectivity | Inspect VM boot diagnostics and serial console output |
 | VM deletion fails | Controller role drift or Azure operation conflict | Restore Bicep roles; reconciler retries on later passes |
 | Container App cannot start | Missing Key Vault secret, RBAC propagation, or ACR pull failure | Verify secret names, role assignments, and image reference |
 
 ## Destroy
 
-Before permanent teardown, remove repository access from the GitHub runner group and delete the logical runner scale set from GitHub organization runner settings so jobs cannot target an ownerless label.
+Before permanent teardown, remove repository access from every runner group and delete logical runner scale sets from GitHub organization settings so jobs cannot target ownerless labels.
 
-Destroy is separate from deployment and must require exact resource-group and subscription confirmation. Key Vault purge protection means its soft-deleted vault cannot be immediately purged or recreated with the same name. See the destroy scripts before running them; do not use resource-group deletion as a routine scale-to-zero mechanism.
+Destroy is separate from deployment and requires `-SubscriptionId` / `--subscription-id` plus exact resource-group and subscription confirmation. Key Vault purge protection means its soft-deleted vault cannot be immediately purged or recreated with the same name. Do not use resource-group deletion as a routine scale-to-zero mechanism.

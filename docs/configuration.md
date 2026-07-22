@@ -1,22 +1,55 @@
 # Configuration
 
-`infra/main.bicep` is the source of truth. `infra/main.parameters.json` maps Azure Developer CLI environment values into its parameters.
+`infra/main.bicep` is the source of truth. `infra/main.parameters.json` maps Azure Developer CLI environment values into its parameters. Deployment scripts validate and normalize the public command-line inputs before provisioning.
 
-## Defaults
+## Deployment inputs
 
 | Setting | Default | Constraint |
 |---|---|---|
-| Subscription | `d901cbec-f20d-4272-a0b4-9ee06b850880` in deployment scripts | Exact confirmation required by scripts |
+| Subscription | Required | Exact confirmation is required for mutation |
+| GitHub organization | Required | GitHub App must be installed here |
 | Region | `eastus2` | Managed image and runner VMs must be in the same region |
 | Resource group | `gha-runners-prod` | Controller custom role is scoped here |
-| GitHub organization | `AvantiPoint` | GitHub App must be installed here |
-| Scale set / label | `avp-linux` | Use this exact value in `runs-on` |
+| Runner group | `default` | Restrict repository access in GitHub settings |
+| Pool configuration | One `azure-linux` pool | Use a JSON file for multiple size classes |
 | Minimum runners | `0` | Controller rejects any other value |
-| Maximum runners | `12` | Fits the subscription's 50-vCPU Dsv5-family quota; controller ceiling is 20 |
-| VM size | `Standard_D4s_v5` | 4 vCPU, 16 GiB, x64 |
+| Maximum runners | `10` for the single-pool shorthand | Each pool must be 1 through 20 |
+| VM size | `Standard_D4s_v5` for the single-pool shorthand | Any validated Standard Azure VM SKU available in the region |
 | VM priority | `Regular` | `Spot` is supported but can evict jobs |
+| Managed-image prefix | `gha-runner` | Timestamp is appended by the deployment script |
 | Idle timeout | 30 minutes | Only known-idle VMs; normal assignment should be much faster |
 | Hard VM lifetime | 12 hours | Cost guard for stuck/orphaned VMs |
+
+There are no default subscription or organization values.
+
+## Runner pool JSON
+
+`runner-pools.example.json` documents the supported shape:
+
+```json
+[
+  {
+    "name": "linux-2vcpu",
+    "vmSize": "Standard_D2s_v5",
+    "maxRunners": 8,
+    "priority": "Regular",
+    "labels": ["linux-2vcpu"]
+  }
+]
+```
+
+The scripts require one through eight unique pool names. Each pool can scale to at most 20 VMs. Missing `priority` defaults to `Regular`; missing or empty `labels` defaults to the pool name. Keep deployment-specific copies outside this public repository when their labels or topology are sensitive.
+
+For a single pool, command-line parameters are sufficient:
+
+```powershell
+./scripts/deploy-azure.ps1 `
+  -SubscriptionId '<subscription-id>' `
+  -GitHubOrganization '<organization>' `
+  -RunnerScaleSetName 'linux-build' `
+  -RunnerVmSize 'Standard_D2s_v5' `
+  -RunnerMaxCapacity 6
+```
 
 ## Azure Developer CLI values
 
@@ -29,6 +62,7 @@ AZURE_RESOURCE_GROUP
 ADMIN_SSH_PUBLIC_KEY
 GITHUB_ORGANIZATION
 RUNNER_GROUP
+RUNNER_POOLS_JSON
 RUNNER_SCALE_SET_NAME
 RUNNER_MAX_CAPACITY
 RUNNER_VM_SIZE
@@ -38,7 +72,7 @@ RUNNER_CONTROLLER_IMAGE
 DEPLOY_RUNNER_CONTROLLER
 ```
 
-Phase one sets the image values empty and `DEPLOY_RUNNER_CONTROLLER=false`. Phase two sets immutable image references and enables the controller.
+The single-pool values mirror pool zero for compatibility. `RUNNER_POOLS_JSON` is authoritative when nonempty. Phase one sets the image values empty and `DEPLOY_RUNNER_CONTROLLER=false`; phase two sets immutable image references and enables all controllers.
 
 ## GitHub App secrets
 
@@ -48,27 +82,18 @@ The dedicated Key Vault uses these secret names:
 - `github-app-installation-id`
 - `github-app-private-key`
 
-The Container App resolves these as Key Vault references through its user-assigned identity. They are never rendered into Bicep deployment history or runner VM configuration.
+Every Container App resolves the same secrets through the shared user-assigned identity. They are never rendered into Bicep deployment history or runner VM configuration.
 
 ## Runner image
 
-`image/runner.pkr.hcl` builds an Ubuntu 24.04 managed image with:
+`image/runner.pkr.hcl` builds one Ubuntu 24.04 managed image shared by all pools. Its contents include GitHub Actions runner 2.335.1, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools.
 
-- GitHub Actions runner 2.335.1, pinned by SHA-256
-- .NET SDK 10.0
-- Node.js 24 and npm
-- Docker Engine, Buildx, and Compose
-- Azure CLI and Azure Developer CLI
-- PowerShell
-- Aspire CLI 13.4.6
-- Java 21, Python 3, Git, build-essential, jq, zip/unzip, and rsync
+Resolved versions are written to `/opt/runner-image/manifest.txt`. Rebuild the image deliberately to accept upstream package updates. `-RunnerImageNamePrefix` / `--runner-image-name-prefix` controls the Azure image-name prefix; it does not affect workflow labels.
 
-The resolved versions are written to `/opt/runner-image/manifest.txt` in the image. Rebuild the image deliberately to accept upstream package updates.
+## Capacity and quota
 
-## Changing capacity
-
-Capacity can be changed without code changes by setting `RUNNER_MAX_CAPACITY` to an integer from 1 through 20 and reprovisioning. The deployed default is 12 because 12 D4s v5 runners consume 48 of the subscription's 50 Dsv5-family vCPUs. Raising it requires quota headroom; the supported controller ceiling remains 20. A larger ceiling requires a code/config review, an Azure quota review, and revisiting the cost guard; do not simply bypass the validation.
+Capacity changes require updating the relevant pool's `maxRunners` or `vmSize` and reprovisioning. Calculate peak vCPU demand as the sum of `maxRunners × SKU vCPUs` across all pools. Confirm both total regional quota and the SKU-family quota; the controllers enforce per-pool limits, not a global Azure quota budget.
 
 ## Spot runners
 
-Set `RUNNER_VM_PRIORITY=Spot` only for retry-safe workflows. Spot VMs use `evictionPolicy=Delete`, so an Azure eviction terminates the current job. Production deployments default to Regular capacity.
+Set a pool's `priority` to `Spot` only for retry-safe workflows. Spot VMs use `evictionPolicy=Delete`, so an Azure eviction terminates the current job. Regular capacity remains the default.
