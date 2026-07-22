@@ -16,30 +16,30 @@ param githubOrganization string
 @description('GitHub runner group. The GitHub App installation must be allowed to manage it.')
 param runnerGroup string = 'default'
 
-@description('Runner scale set name and workflow runs-on label. Used only when runnerPoolsJson is empty.')
+@description('Runner scale set name and workflow runs-on label. Used only when runnerPoolsBase64 is empty.')
 @minLength(1)
 param runnerScaleSetName string = 'azure-linux'
 
-@description('Maximum concurrent ephemeral runner VMs. Used only when runnerPoolsJson is empty.')
+@description('Maximum concurrent ephemeral runner VMs. Used only when runnerPoolsBase64 is empty.')
 @minValue(1)
 @maxValue(20)
 param maxRunners int = 10
 
-@description('Azure VM size used for each ephemeral runner. Used only when runnerPoolsJson is empty.')
+@description('Azure VM size used for each ephemeral runner. Used only when runnerPoolsBase64 is empty.')
 param runnerVmSize string = 'Standard_D4s_v5'
 
 @description('Optional managed image or Compute Gallery image version resource ID. Empty uses Ubuntu 24.04 and bootstraps at startup.')
 param runnerImageId string = ''
 
-@description('Regular is reliable capacity. Spot is cheaper but jobs can be evicted. Used only when runnerPoolsJson is empty.')
+@description('Regular is reliable capacity. Spot is cheaper but jobs can be evicted. Used only when runnerPoolsBase64 is empty.')
 @allowed([
   'Regular'
   'Spot'
 ])
 param runnerVmPriority string = 'Regular'
 
-@description('Optional JSON array of independently scaled runner pools. Each item accepts name, vmSize, maxRunners, priority, and labels. Empty uses the single-pool parameters for compatibility.')
-param runnerPoolsJson string = ''
+@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, maxRunners, priority, and labels. Empty uses the single-pool parameters for compatibility.')
+param runnerPoolsBase64 string = ''
 
 @description('Linux admin user for emergency access. The subnet NSG denies inbound Internet traffic.')
 param adminUsername string = 'azureuser'
@@ -75,7 +75,7 @@ var tags = {
   'managed-by': 'azd'
 }
 
-var runnerPools = empty(runnerPoolsJson) ? [
+var runnerPools = empty(runnerPoolsBase64) ? [
   {
     name: runnerScaleSetName
     vmSize: runnerVmSize
@@ -85,7 +85,7 @@ var runnerPools = empty(runnerPoolsJson) ? [
       runnerScaleSetName
     ]
   }
-] : json(runnerPoolsJson)
+] : json(base64ToString(runnerPoolsBase64))
 
 resource runnerResourceGroup 'Microsoft.Resources/resourceGroups@2022-09-01' = {
   name: resourceGroupName

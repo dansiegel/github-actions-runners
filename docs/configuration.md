@@ -63,6 +63,7 @@ ADMIN_SSH_PUBLIC_KEY
 GITHUB_ORGANIZATION
 RUNNER_GROUP
 RUNNER_POOLS_JSON
+RUNNER_POOLS_BASE64
 RUNNER_SCALE_SET_NAME
 RUNNER_MAX_CAPACITY
 RUNNER_VM_SIZE
@@ -72,7 +73,7 @@ RUNNER_CONTROLLER_IMAGE
 DEPLOY_RUNNER_CONTROLLER
 ```
 
-The single-pool values mirror pool zero for compatibility. `RUNNER_POOLS_JSON` is authoritative when nonempty. Phase one sets the image values empty and `DEPLOY_RUNNER_CONTROLLER=false`; phase two sets immutable image references and enables all controllers.
+The single-pool values mirror pool zero for compatibility. `RUNNER_POOLS_JSON` is the human-readable authoritative definition; the deployment scripts derive `RUNNER_POOLS_BASE64` from it so `azd` can safely interpolate the structured value into its JSON parameters document. Bicep decodes that transport value before creating the pools. Phase one sets the image values empty and `DEPLOY_RUNNER_CONTROLLER=false`; phase two sets immutable image references and enables all controllers.
 
 ## GitHub App secrets
 
