@@ -64,6 +64,10 @@ and executes `sudo --non-interactive true` as `actions-runner`. This preserves
 compatibility with Linux workflows that rely on GitHub's passwordless `sudo`
 contract without waiting for a live job to expose a configuration error.
 
+The pinned Aspire CLI is also executed as `actions-runner` during the image
+build. This catches NativeAOT tool-package permission changes that would be
+invisible when the root image provisioner writes the version manifest.
+
 ## Live smoke test
 
 Automated local tests do not prove Azure quota, GitHub App installation, runner-group access, or marketplace availability. Before migrating a production repository, run a temporary workflow:
@@ -117,6 +121,7 @@ The implementation is ready for repository migration only when:
 - Packer validates;
 - the image-build write probe succeeds for `/usr/share/dotnet`;
 - the image-build passwordless-sudo probe succeeds as `actions-runner`;
+- the pinned Aspire CLI executes successfully as `actions-runner`;
 - phase-one and phase-two Azure deployments succeed;
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;

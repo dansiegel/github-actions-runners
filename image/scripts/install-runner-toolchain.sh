@@ -65,6 +65,7 @@ apt-get install -y --no-install-recommends powershell
 
 # Aspire CLI is version-pinned because it participates directly in build behavior.
 dotnet tool install Aspire.Cli --tool-path /opt/aspire --version "$ASPIRE_CLI_VERSION"
+chmod -R a+rX /opt/aspire
 ln -s /opt/aspire/aspire /usr/local/bin/aspire
 
 # The runner binary is also pinned and checksum-verified. JIT configuration is
@@ -80,6 +81,7 @@ printf 'actions-runner ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/actions-runne
 chmod 0440 /etc/sudoers.d/actions-runner
 visudo --check --file /etc/sudoers.d/actions-runner
 runuser --user actions-runner -- sudo --non-interactive true
+runuser --user actions-runner -- env HOME=/home/actions-runner /usr/local/bin/aspire --version
 
 # Canonical installs .NET under /usr/lib, while actions/setup-dotnet uses
 # /usr/share/dotnet by default on Linux. Alias the action's default to the
