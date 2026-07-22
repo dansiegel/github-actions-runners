@@ -4,20 +4,8 @@ param location string
 param environmentName string
 param githubOrganization string
 param runnerGroup string
-param runnerScaleSetName string
-
-@minValue(1)
-@maxValue(20)
-param maxRunners int
-
-param runnerVmSize string
+param runnerPools array
 param runnerImageId string
-
-@allowed([
-  'Regular'
-  'Spot'
-])
-param runnerVmPriority string
 
 param adminUsername string
 param adminSshPublicKey string
@@ -31,7 +19,6 @@ param tags object
 
 var resourceToken = take(toLower(replace(environmentName, '-', '')), 12)
 var containerRegistryName = take(toLower('acrgha${uniqueString(subscription().id, resourceGroup().id)}'), 50)
-var controllerName = take('gha-scale-controller-${resourceToken}', 32)
 var controllerIdentityName = take('gha-scale-controller-${resourceToken}-mi', 128)
 var managedEnvironmentName = take('gha-runners-${resourceToken}-cae', 32)
 var runnerVnetName = 'gha-runners-${resourceToken}-vnet'
@@ -235,13 +222,17 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
   }
 }
 
-resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployController) {
-  name: controllerName
+resource runnerControllers 'Microsoft.App/containerApps@2024-03-01' = [for (runnerPool, poolIndex) in runnerPools: if (deployController) {
+  // Preserve the original controller name for pool zero so existing deployments
+  // update in place instead of leaving a second listener on the same scale set.
+  name: poolIndex == 0 ? take('gha-scale-controller-${resourceToken}', 32) : take('gha-${resourceToken}-${take(toLower(replace(replace(runnerPool.name, '.', '-'), '_', '-')), 8)}-${take(uniqueString(runnerPool.name), 6)}', 32)
   location: location
   tags: union(tags, {
     purpose: 'github-runner-scale-set-listener'
     'runner-min-capacity': '0'
-    'runner-max-capacity': string(maxRunners)
+    'runner-scale-set': runnerPool.name
+    'runner-vm-size': runnerPool.vmSize
+    'runner-max-capacity': string(runnerPool.maxRunners)
   })
   identity: {
     type: 'UserAssigned'
@@ -293,11 +284,11 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
             }
             {
               name: 'RUNNER_SCALE_SET_NAME'
-              value: runnerScaleSetName
+              value: runnerPool.name
             }
             {
               name: 'RUNNER_LABELS'
-              value: runnerScaleSetName
+              value: join(runnerPool.?labels ?? [runnerPool.name], ',')
             }
             {
               name: 'RUNNER_GROUP'
@@ -309,7 +300,7 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
             }
             {
               name: 'MAX_RUNNERS'
-              value: string(maxRunners)
+              value: string(runnerPool.maxRunners)
             }
             {
               name: 'GITHUB_APP_CLIENT_ID'
@@ -345,7 +336,7 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
             }
             {
               name: 'RUNNER_VM_SIZE'
-              value: runnerVmSize
+              value: runnerPool.vmSize
             }
             {
               name: 'RUNNER_IMAGE_ID'
@@ -353,7 +344,7 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
             }
             {
               name: 'RUNNER_VM_PRIORITY'
-              value: runnerVmPriority
+              value: runnerPool.?priority ?? 'Regular'
             }
             {
               name: 'RUNNER_PUBLIC_IP'
@@ -409,12 +400,19 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
     keyVaultSecretsUserRoleAssignment
     runnerLifecycleRoleAssignment
   ]
-}
+}]
 
 output containerRegistryName string = containerRegistry.name
 output containerRegistryLoginServer string = containerRegistry.properties.loginServer
 output githubAppKeyVaultName string = githubAppVault.name
 output controllerIdentityClientId string = controllerIdentity.properties.clientId
-output controllerName string = deployController ? runnerController!.name : ''
+var controllerNames = [for index in range(0, deployController ? length(runnerPools) : 0): runnerControllers[index].name]
+var runnerScaleSetNames = [for runnerPool in runnerPools: runnerPool.name]
+
+output controllerName string = length(controllerNames) > 0 ? controllerNames[0] : ''
+output controllerNames array = controllerNames
 output controllerDeployed bool = deployController
+output runnerScaleSetName string = runnerScaleSetNames[0]
+output runnerScaleSetNames array = runnerScaleSetNames
+output runnerMaxCapacity int = runnerPools[0].maxRunners
 output runnerSubnetId string = runnerVirtualNetwork.properties.subnets[0].id

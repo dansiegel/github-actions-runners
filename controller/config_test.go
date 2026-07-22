@@ -11,10 +11,10 @@ import (
 
 func validConfig() Config {
 	return Config{
-		RegistrationURL: "https://github.com/AvantiPoint",
-		ScaleSetName:    "avp-linux-lg",
+		RegistrationURL: "https://github.com/example-org",
+		ScaleSetName:    "linux-4vcpu",
 		RunnerGroup:     scaleset.DefaultRunnerGroup,
-		Labels:          []string{"avp-linux-lg"},
+		Labels:          []string{"linux-4vcpu"},
 		MinRunners:      0,
 		MaxRunners:      20,
 		GitHubApp: scaleset.GitHubAppAuth{
@@ -22,7 +22,7 @@ func validConfig() Config {
 			InstallationID: 123,
 			PrivateKey:     "test-private-key",
 		},
-		SubscriptionID:       "d901cbec-f20d-4272-a0b4-9ee06b850880",
+		SubscriptionID:       "00000000-0000-0000-0000-000000000000",
 		ResourceGroup:        "gha-runners-prod",
 		Location:             "eastus2",
 		SubnetID:             "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/runners",
@@ -92,7 +92,7 @@ func TestCloudInitProtectsJITAndPowersOff(t *testing.T) {
 }
 
 func TestAzureResourceNameIsStableAndBounded(t *testing.T) {
-	name := azureResourceName("AVP Linux/Large Runner With A Very Long Invalid Name ################")
+	name := azureResourceName("Example Linux/Large Runner With A Very Long Invalid Name ################")
 	if len(name) > 54 {
 		t.Fatalf("resource name length = %d, want <= 54", len(name))
 	}

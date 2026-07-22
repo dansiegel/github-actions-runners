@@ -57,7 +57,7 @@ func TestAzureCreateUsesJITCustomDataWithoutRunnerIdentity(t *testing.T) {
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	vm, err := manager.Create(context.Background(), "avp-linux-abc123", "one-time-jit")
+	vm, err := manager.Create(context.Background(), "linux-4vcpu-abc123", "one-time-jit")
 	if err != nil {
 		t.Fatalf("create VM: %v", err)
 	}

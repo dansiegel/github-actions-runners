@@ -1,60 +1,108 @@
 # Ephemeral GitHub Actions runners on Azure
 
-This repository deploys an organization-level GitHub runner scale set for **AvantiPoint** in Azure subscription `d901cbec-f20d-4272-a0b4-9ee06b850880`.
+This repository deploys organization-level GitHub runner scale sets backed by ephemeral Azure VMs. The Azure subscription, GitHub organization, workflow labels, VM sizes, capacities, priorities, and managed-image prefix are deployment inputs; no tenant-specific values are embedded in the public source.
 
-The supported pool is `avp-linux`:
+Each configured pool:
 
-- scales from **0 to 12** `Standard_D4s_v5` runner VMs from GitHub's live assigned-job count;
+- scales independently from zero to its configured maximum using GitHub's live assigned-job count;
 - creates a clean Azure VM with a one-time GitHub JIT configuration for every job;
 - powers the VM off when the job ends and deletes the VM, OS disk, NIC, and public IP;
-- preinstalls .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire CLI in a reusable managed image;
-- keeps GitHub App and Azure lifecycle credentials in the controller only—runner VMs have no managed identity or Key Vault access.
+- uses the same reusable image with .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire CLI;
+- keeps GitHub App and Azure lifecycle credentials in its controller—runner VMs have no managed identity or Key Vault access.
 
-Only a 0.25-vCPU / 0.5-GiB Container Apps controller and low-cost control-plane resources remain when no jobs are running. There is no always-on runner VM and no NAT Gateway.
+Only one 0.25-vCPU / 0.5-GiB Container App controller per pool and low-cost shared control-plane resources remain when no jobs are running. There is no always-on runner VM and no NAT Gateway.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    G["GitHub workflow<br/>runs-on: avp-linux"] --> S["GitHub runner scale set<br/>assigned-job count"]
-    S --> C["Container Apps controller<br/>1 small replica"]
-    C -->|"Generate one-time JIT config"| G
-    C -->|"0..12"| V["Ephemeral Azure VMs<br/>prebuilt toolchain image"]
-    V -->|"one job"| G
-    G -->|"JobCompleted"| C
-    C -->|"delete VM + disk + NIC + IP"| V
-    K["Key Vault<br/>GitHub App secrets"] --> C
+    W2["Workflow<br/>runs-on: linux-2vcpu"] --> S2["2-vCPU GitHub scale set"]
+    W4["Workflow<br/>runs-on: linux-4vcpu"] --> S4["4-vCPU GitHub scale set"]
+    S2 --> C2["Small-pool controller"]
+    S4 --> C4["Large-pool controller"]
+    C2 -->|"0..N"| V2["Ephemeral 2-vCPU VMs"]
+    C4 -->|"0..N"| V4["Ephemeral 4-vCPU VMs"]
+    I["Shared prebuilt toolchain image"] --> V2
+    I --> V4
+    K["Key Vault<br/>GitHub App secrets"] --> C2
+    K --> C4
 ```
 
-The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/actions/scaleset) client, not delayed workflow webhooks. It reports the deployed maximum of 12 to GitHub and scales from `statistics.TotalAssignedJobs`, which includes queued and running work. The controller supports up to 20 after the Dsv5-family quota is raised.
+The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/actions/scaleset) client, not delayed workflow webhooks. Every pool has a hard limit of 20 runners and always has a minimum of zero.
 
 ## Prerequisites
 
 - Azure CLI and Azure Developer CLI (`azd`)
 - Packer 1.15.4 or newer
+- `jq` for the Bash deployment script
 - permissions to create resources, custom roles, and role assignments in the target subscription/resource group
 - an SSH public key
-- a GitHub App installed on AvantiPoint with **Organization self-hosted runners: Read and write**
+- a GitHub App installed on the target organization with **Organization self-hosted runners: Read and write**
 
 Capture the GitHub App client ID (or numeric App ID), installation ID, and a private key PEM.
 
+## Configure runner pools
+
+Copy [runner-pools.example.json](runner-pools.example.json) to a deployment-private location and customize it. The public example creates independently selectable 2-vCPU and 4-vCPU labels:
+
+```json
+[
+  {
+    "name": "linux-2vcpu",
+    "vmSize": "Standard_D2s_v5",
+    "maxRunners": 8,
+    "priority": "Regular",
+    "labels": ["linux-2vcpu"]
+  },
+  {
+    "name": "linux-4vcpu",
+    "vmSize": "Standard_D4s_v5",
+    "maxRunners": 4,
+    "priority": "Regular",
+    "labels": ["linux-4vcpu"]
+  }
+]
+```
+
+The pool `name` is the GitHub runner scale-set name and the value workflows use in `runs-on`. It is separate from the timestamped Azure managed-image name. Pool order is stable configuration: pool zero retains the original controller resource name for safe upgrades of existing single-pool installations.
+
+For one pool, omit the JSON file and pass `-RunnerScaleSetName`, `-RunnerVmSize`, and `-RunnerMaxCapacity` (or the equivalent Bash flags).
+
 ## Deploy
 
-The script is dry-run by default and requires the exact subscription ID before mutation.
+The scripts are dry-run by default. Subscription and organization are required inputs, and Azure mutation requires repeating the exact subscription ID.
 
 PowerShell:
 
 ```powershell
-./scripts/deploy-azure.ps1 -Mode Apply `
-  -BootstrapOnly `
-  -ConfirmSubscription d901cbec-f20d-4272-a0b4-9ee06b850880
+./scripts/deploy-azure.ps1 `
+  -SubscriptionId '<subscription-id>' `
+  -GitHubOrganization '<organization>' `
+  -RunnerPoolsFile '/private/config/runner-pools.json' `
+  -BootstrapOnly
+
+./scripts/deploy-azure.ps1 `
+  -Mode Apply `
+  -SubscriptionId '<subscription-id>' `
+  -ConfirmSubscription '<subscription-id>' `
+  -GitHubOrganization '<organization>' `
+  -RunnerPoolsFile '/private/config/runner-pools.json' `
+  -BootstrapOnly
 ```
 
 Bash:
 
 ```bash
+./scripts/deploy-azure.sh \
+  --subscription-id '<subscription-id>' \
+  --github-organization '<organization>' \
+  --runner-pools-file '/private/config/runner-pools.json'
+
 ./scripts/deploy-azure.sh --apply --bootstrap-only \
-  --confirm-subscription d901cbec-f20d-4272-a0b4-9ee06b850880
+  --subscription-id '<subscription-id>' \
+  --confirm-subscription '<subscription-id>' \
+  --github-organization '<organization>' \
+  --runner-pools-file '/private/config/runner-pools.json'
 ```
 
 Bootstrap creates the resource group, VNet/NSG, ACR, Key Vault, log workspace, Container Apps environment, controller identity, and least-privilege roles. It creates no runner VM.
@@ -68,17 +116,15 @@ az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-installation
 az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-private-key --file '/secure/path/app.private-key.pem'
 ```
 
-Then run the same deployment command without `--bootstrap-only` / `-BootstrapOnly`. It builds the managed runner image, builds the controller in ACR, enables the controller, and creates or adopts the GitHub logical scale set.
+Then run the apply command without `--bootstrap-only` / `-BootstrapOnly`. It builds one managed runner image, builds the controller in ACR, and deploys a controller for each pool. To reuse an already validated image, pass its resource ID with `-RunnerImageId` or `--runner-image-id`.
 
-To reuse an already validated managed image, pass its resource ID with `-RunnerImageId` (PowerShell) or `--runner-image-id` (Bash). The script verifies that the exact resource exists before using it.
-
-Before migrating workflows, grant the runner group access only to the intended private or internal repositories. Change their runner selection to:
+Before migrating workflows, grant the runner group access only to intended trusted private/internal repositories. A workflow selects a size class by pool name:
 
 ```yaml
-runs-on: avp-linux
+runs-on: linux-2vcpu
 ```
 
-See [workflow migration](docs/migration.md) and [operations](docs/operations.md) for rollout and verification.
+See [workflow migration](docs/migration.md), [configuration](docs/configuration.md), and [operations](docs/operations.md) for rollout and verification.
 
 ## Verify locally
 
@@ -87,8 +133,8 @@ docker run --rm -v "${PWD}/controller:/src" -w /src golang:1.25.7-alpine go test
 az bicep build --file infra/main.bicep --stdout | Out-Null
 packer init image/runner.pkr.hcl
 packer validate `
-  -var subscription_id=d901cbec-f20d-4272-a0b4-9ee06b850880 `
-  -var resource_group_name=gha-runners-prod `
+  -var subscription_id=00000000-0000-0000-0000-000000000000 `
+  -var resource_group_name=gha-runners-validation `
   -var managed_image_name=validation-only `
   image/runner.pkr.hcl
 ```

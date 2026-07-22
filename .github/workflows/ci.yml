@@ -53,8 +53,8 @@ jobs:
             -w /workspace \
             hashicorp/packer:1.15.4 \
             validate \
-              -var subscription_id=d901cbec-f20d-4272-a0b4-9ee06b850880 \
-              -var resource_group_name=gha-runners-prod \
+              -var subscription_id=00000000-0000-0000-0000-000000000000 \
+              -var resource_group_name=gha-runners-validation \
               -var managed_image_name=validation-only \
               runner.pkr.hcl
 
@@ -66,5 +66,15 @@ jobs:
 
       - name: Verify safe dry runs
         run: |
-          ./scripts/deploy-azure.sh --dry-run
-          ./scripts/destroy-azure.sh --dry-run
+          ./scripts/deploy-azure.sh --dry-run \
+            --subscription-id 00000000-0000-0000-0000-000000000000 \
+            --github-organization ExampleOrg \
+            --runner-pools-file runner-pools.example.json
+          ./scripts/destroy-azure.sh --dry-run \
+            --subscription-id 00000000-0000-0000-0000-000000000000
+          pwsh -NoProfile -File scripts/deploy-azure.ps1 \
+            -SubscriptionId 00000000-0000-0000-0000-000000000000 \
+            -GitHubOrganization ExampleOrg \
+            -RunnerPoolsFile runner-pools.example.json
+          pwsh -NoProfile -File scripts/destroy-azure.ps1 \
+            -SubscriptionId 00000000-0000-0000-0000-000000000000

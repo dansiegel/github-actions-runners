@@ -39,8 +39,8 @@ Validate Packer without creating Azure resources:
 ```bash
 packer init image/runner.pkr.hcl
 packer validate \
-  -var subscription_id=d901cbec-f20d-4272-a0b4-9ee06b850880 \
-  -var resource_group_name=gha-runners-prod \
+  -var subscription_id=00000000-0000-0000-0000-000000000000 \
+  -var resource_group_name=gha-runners-validation \
   -var managed_image_name=validation-only \
   image/runner.pkr.hcl
 ```
@@ -78,7 +78,7 @@ on: workflow_dispatch
 
 jobs:
   verify:
-    runs-on: avp-linux
+    runs-on: linux-2vcpu
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v5
@@ -109,7 +109,7 @@ Verify the following lifecycle:
 
 ## Burst test
 
-Use a workflow-dispatch matrix matching the deployed capacity only after quota is confirmed (12 jobs for this subscription). Observe that no more than the configured maximum is created, then verify complete scale-to-zero. Testing the controller ceiling of 20 requires at least 80 available Dsv5-family vCPUs. Do not run a paid burst merely to validate source changes; schedule it as a controlled acceptance test with an approved spend window.
+Use a workflow-dispatch matrix matching one pool's deployed capacity only after quota is confirmed. Observe that no more than that pool's configured maximum is created, verify other pools are unaffected, then verify complete scale-to-zero. Test combined peaks only in a controlled acceptance window with an approved spend limit; local source validation does not justify a paid burst.
 
 ## Completion requirements
 
