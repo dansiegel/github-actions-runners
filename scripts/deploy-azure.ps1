@@ -100,6 +100,7 @@ function Get-NormalizedRunnerPools {
 
 $runnerPools = @(Get-NormalizedRunnerPools)
 $runnerPoolsJson = ConvertTo-Json -InputObject $runnerPools -Compress -Depth 5
+$runnerPoolsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($runnerPoolsJson))
 $primaryPool = $runnerPools[0]
 
 Write-Host "Target subscription: $SubscriptionId"
@@ -151,6 +152,7 @@ azd env set RUNNER_MAX_CAPACITY ([string] $primaryPool.maxRunners)
 azd env set RUNNER_VM_SIZE $primaryPool.vmSize
 azd env set RUNNER_VM_PRIORITY $primaryPool.priority
 azd env set RUNNER_POOLS_JSON $runnerPoolsJson
+azd env set RUNNER_POOLS_BASE64 $runnerPoolsBase64
 azd env set RUNNER_IMAGE_ID $RunnerImageId
 azd env set RUNNER_CONTROLLER_IMAGE ''
 azd env set DEPLOY_RUNNER_CONTROLLER false

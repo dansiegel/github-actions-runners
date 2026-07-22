@@ -35,8 +35,8 @@
     "runnerVmPriority": {
       "value": "${RUNNER_VM_PRIORITY}"
     },
-    "runnerPoolsJson": {
-      "value": "${RUNNER_POOLS_JSON}"
+    "runnerPoolsBase64": {
+      "value": "${RUNNER_POOLS_BASE64}"
     },
     "controllerContainerImage": {
       "value": "${RUNNER_CONTROLLER_IMAGE}"

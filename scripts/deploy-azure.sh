@@ -96,6 +96,11 @@ else
   RUNNER_POOLS_JSON="$(jq -cn --arg name "$RUNNER_SCALE_SET_NAME" --arg vmSize "$RUNNER_VM_SIZE" --argjson maxRunners "$RUNNER_MAX_CAPACITY" --arg priority "$RUNNER_VM_PRIORITY" --arg labels "$RUNNER_LABELS" '[{name:$name,vmSize:$vmSize,maxRunners:$maxRunners,priority:$priority,labels:($labels | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}]')"
 fi
 
+# azd interpolates environment values into a JSON parameters document before
+# parsing it. Base64 keeps the structured pool definition safe for that string
+# transport; Bicep decodes it back to JSON inside the deployment.
+RUNNER_POOLS_BASE64="$(printf '%s' "$RUNNER_POOLS_JSON" | base64 | tr -d '\r\n')"
+
 PRIMARY_POOL_NAME="$(jq -r '.[0].name' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_MAX="$(jq -r '.[0].maxRunners' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_VM_SIZE="$(jq -r '.[0].vmSize' <<<"$RUNNER_POOLS_JSON")"
@@ -145,6 +150,7 @@ azd env set RUNNER_MAX_CAPACITY "$PRIMARY_POOL_MAX"
 azd env set RUNNER_VM_SIZE "$PRIMARY_POOL_VM_SIZE"
 azd env set RUNNER_VM_PRIORITY "$PRIMARY_POOL_PRIORITY"
 azd env set RUNNER_POOLS_JSON "$RUNNER_POOLS_JSON"
+azd env set RUNNER_POOLS_BASE64 "$RUNNER_POOLS_BASE64"
 azd env set RUNNER_IMAGE_ID "$EXISTING_RUNNER_IMAGE_ID"
 azd env set RUNNER_CONTROLLER_IMAGE ""
 azd env set DEPLOY_RUNNER_CONTROLLER "false"
