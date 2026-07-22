@@ -51,9 +51,9 @@ Runner resources are tagged so reconciliation and audit queries stay scoped to r
 
 If outbound allow-listing or data-exfiltration controls are required, route the subnet through an approved firewall/proxy and update the cost model.
 
-## Docker
+## Runner host privileges
 
-Membership in the Docker group is effectively root access on the ephemeral VM. This is necessary for Docker actions, service containers, image builds, and Testcontainers. The mitigation is host-level ephemerality and the absence of Azure/GitHub controller credentials—not an assumption that Docker itself is a sandbox.
+The runner account has passwordless `sudo`, matching the standard GitHub Linux-runner workflow contract, and belongs to the Docker group for Docker actions, service containers, image builds, and Testcontainers. Either capability is effectively root access on the ephemeral VM. The mitigation is host-level ephemerality and the absence of Azure/GitHub controller credentials—not an assumption that the runner account or Docker is a sandbox.
 
 ## Supply chain
 

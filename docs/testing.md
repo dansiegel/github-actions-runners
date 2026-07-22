@@ -59,6 +59,11 @@ The Packer build aliases the Canonical package installation to
 with the default Linux install directory used by `actions/setup-dotnet` image-
 build invariants.
 
+The image build also validates the runner-specific sudoers file with `visudo`
+and executes `sudo --non-interactive true` as `actions-runner`. This preserves
+compatibility with Linux workflows that rely on GitHub's passwordless `sudo`
+contract without waiting for a live job to expose a configuration error.
+
 ## Live smoke test
 
 Automated local tests do not prove Azure quota, GitHub App installation, runner-group access, or marketplace availability. Before migrating a production repository, run a temporary workflow:
@@ -79,6 +84,7 @@ jobs:
       - run: node --version
       - run: docker version
       - run: docker buildx version
+      - run: sudo --non-interactive true
       - run: az version
       - run: azd version
       - run: pwsh -NoProfile -Command '$PSVersionTable.PSVersion'
@@ -110,6 +116,7 @@ The implementation is ready for repository migration only when:
 - Bicep compiles without errors;
 - Packer validates;
 - the image-build write probe succeeds for `/usr/share/dotnet`;
+- the image-build passwordless-sudo probe succeeds as `actions-runner`;
 - phase-one and phase-two Azure deployments succeed;
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;

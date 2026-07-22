@@ -25,6 +25,7 @@ apt-get install -y --no-install-recommends \
   python3-venv \
   rsync \
   software-properties-common \
+  sudo \
   tar \
   unzip \
   zip
@@ -71,6 +72,14 @@ ln -s /opt/aspire/aspire /usr/local/bin/aspire
 id actions-runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash actions-runner
 usermod -aG docker actions-runner
 install -d -o actions-runner -g actions-runner /opt/actions-runner
+
+# GitHub-hosted Linux runners allow workflows to use sudo without an
+# interactive password. Match that contract on the single-use VM; Docker group
+# membership already gives this account equivalent host-level privileges.
+printf 'actions-runner ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/actions-runner
+chmod 0440 /etc/sudoers.d/actions-runner
+visudo --check --file /etc/sudoers.d/actions-runner
+runuser --user actions-runner -- sudo --non-interactive true
 
 # Canonical installs .NET under /usr/lib, while actions/setup-dotnet uses
 # /usr/share/dotnet by default on Linux. Alias the action's default to the
