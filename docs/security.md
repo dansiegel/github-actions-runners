@@ -57,7 +57,7 @@ The runner account has passwordless `sudo`, matching the standard GitHub Linux-r
 
 ## Supply chain
 
-The Actions runner archive is pinned to a version and SHA-256. Aspire CLI is version-pinned. Ubuntu, Docker, NodeSource, Azure CLI, `azd`, and PowerShell packages resolve from their stable signed feeds at image-build time; their resolved versions are captured in `/opt/runner-image/manifest.txt`.
+The Actions runner archive is pinned to a version and SHA-256. Aspire CLI is version-pinned. Ubuntu, Docker, NodeSource, Azure CLI, Bicep CLI, `azd`, and PowerShell packages resolve from their stable signed feeds at image-build time; their resolved versions are captured in `/opt/runner-image/manifest.txt`.
 
 For stricter reproducibility, mirror and pin every package in an internal feed, verify installer-script hashes, scan the managed image, and sign an image provenance record before production rollout.
 

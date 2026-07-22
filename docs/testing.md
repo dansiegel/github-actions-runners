@@ -68,6 +68,9 @@ The pinned Aspire CLI is also executed as `actions-runner` during the image
 build. This catches NativeAOT tool-package permission changes that would be
 invisible when the root image provisioner writes the version manifest.
 
+Azure Bicep is installed beneath the same account's home and executed during
+the build; the image build fails unless `$HOME/.azure/bin/bicep` is executable.
+
 ## Live smoke test
 
 Automated local tests do not prove Azure quota, GitHub App installation, runner-group access, or marketplace availability. Before migrating a production repository, run a temporary workflow:
@@ -90,6 +93,7 @@ jobs:
       - run: docker buildx version
       - run: sudo --non-interactive true
       - run: az version
+      - run: az bicep version
       - run: azd version
       - run: pwsh -NoProfile -Command '$PSVersionTable.PSVersion'
       - run: aspire --version
@@ -122,6 +126,7 @@ The implementation is ready for repository migration only when:
 - the image-build write probe succeeds for `/usr/share/dotnet`;
 - the image-build passwordless-sudo probe succeeds as `actions-runner`;
 - the pinned Aspire CLI executes successfully as `actions-runner`;
+- Azure Bicep is preinstalled and executes successfully as `actions-runner`;
 - phase-one and phase-two Azure deployments succeed;
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;

@@ -110,7 +110,7 @@ Write-Host 'Runner pools:'
 foreach ($pool in $runnerPools) {
     Write-Host ("  {0}: 0..{1} {2} ({3})" -f $pool.name, $pool.maxRunners, $pool.vmSize, $pool.priority)
 }
-Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI, azd, PowerShell, Aspire'
+Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 
 if ($Mode -ne 'Apply') {
     Write-Host 'Dry run only. No Azure resources were changed.'

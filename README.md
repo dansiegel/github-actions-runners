@@ -7,7 +7,7 @@ Each configured pool:
 - scales independently from zero to its configured maximum using GitHub's live assigned-job count;
 - creates a clean Azure VM with a one-time GitHub JIT configuration for every job;
 - powers the VM off when the job ends and deletes the VM, OS disk, NIC, and public IP;
-- uses the same reusable image with .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire CLI;
+- uses the same reusable image with .NET 10, Node.js 24, Docker/Buildx/Compose, Azure CLI and Bicep CLI, `azd`, PowerShell, Java 21, and Aspire CLI;
 - keeps GitHub App and Azure lifecycle credentials in its controller—runner VMs have no managed identity or Key Vault access.
 
 Only one 0.25-vCPU / 0.5-GiB Container App controller per pool and low-cost shared control-plane resources remain when no jobs are running. There is no always-on runner VM and no NAT Gateway.
@@ -32,7 +32,7 @@ The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/
 
 ## Prerequisites
 
-- Azure CLI and Azure Developer CLI (`azd`)
+- Azure CLI, Bicep CLI, and Azure Developer CLI (`azd`)
 - Packer 1.15.4 or newer
 - `jq` for the Bash deployment script
 - permissions to create resources, custom roles, and role assignments in the target subscription/resource group

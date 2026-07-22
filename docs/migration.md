@@ -29,7 +29,7 @@ jobs:
 
 Runner scale-set job routing uses the scale-set name; do not use a list such as `[self-hosted, linux, x64]` for these pools.
 
-The VM image already contains .NET 10, Node 24, Docker/Buildx/Compose, Azure CLI, `azd`, PowerShell, Java 21, and Aspire. Keep setup actions that enforce an exact project SDK/tool version, but remove redundant installs only after comparing workflow behavior. Image presence is an optimization, not a reason to weaken repository-pinned version policy.
+The VM image already contains .NET 10, Node 24, Docker/Buildx/Compose, Azure CLI and Bicep CLI, `azd`, PowerShell, Java 21, and Aspire. Keep setup actions that enforce an exact project SDK/tool version, but remove redundant installs only after comparing workflow behavior. Image presence is an optimization, not a reason to weaken repository-pinned version policy.
 
 ## Recommended rollout
 

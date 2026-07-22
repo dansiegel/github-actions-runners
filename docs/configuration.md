@@ -86,7 +86,7 @@ Every Container App resolves the same secrets through the shared user-assigned i
 
 ## Runner image
 
-`image/runner.pkr.hcl` builds one Ubuntu 24.04 managed image shared by all pools. Its contents include GitHub Actions runner 2.335.1, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools.
+`image/runner.pkr.hcl` builds one Ubuntu 24.04 managed image shared by all pools. Its contents include GitHub Actions runner 2.335.1, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and Bicep CLI, `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools.
 
 Resolved versions are written to `/opt/runner-image/manifest.txt`. Rebuild the image deliberately to accept upstream package updates. `-RunnerImageNamePrefix` / `--runner-image-name-prefix` controls the Azure image-name prefix; it does not affect workflow labels.
 
