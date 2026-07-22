@@ -60,7 +60,7 @@ The Container App resolves these as Key Vault references through its user-assign
 - Docker Engine, Buildx, and Compose
 - Azure CLI and Azure Developer CLI
 - PowerShell
-- Aspire CLI 13.4.0
+- Aspire CLI 13.4.6
 - Java 21, Python 3, Git, build-essential, jq, zip/unzip, and rsync
 
 The resolved versions are written to `/opt/runner-image/manifest.txt` in the image. Rebuild the image deliberately to accept upstream package updates.

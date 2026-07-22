@@ -42,7 +42,7 @@ variable "runner_sha256" {
 
 variable "aspire_cli_version" {
   type    = string
-  default = "13.4.0"
+  default = "13.4.6"
 }
 
 source "azure-arm" "runner" {
