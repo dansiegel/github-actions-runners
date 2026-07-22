@@ -74,6 +74,19 @@ id actions-runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash act
 usermod -aG docker actions-runner
 install -d -o actions-runner -g actions-runner /opt/actions-runner
 
+# Azure CLI installs Bicep on demand beneath the invoking user's home. Install
+# it while the image is built so concurrent workflow processes never race to
+# create or replace the executable on a newly started runner.
+install -d -o actions-runner -g actions-runner /home/actions-runner/.azure
+runuser --user actions-runner -- env HOME=/home/actions-runner az bicep install
+bicep_path=/home/actions-runner/.azure/bin/bicep
+if [[ ! -x "$bicep_path" ]]; then
+  printf 'Expected an executable Bicep CLI at %s\n' "$bicep_path" >&2
+  exit 1
+fi
+chown -R actions-runner:actions-runner /home/actions-runner/.azure
+runuser --user actions-runner -- env HOME=/home/actions-runner az bicep version
+
 # GitHub-hosted Linux runners allow workflows to use sudo without an
 # interactive password. Match that contract on the single-use VM; Docker group
 # membership already gives this account equivalent host-level privileges.
@@ -135,6 +148,7 @@ rm -rf /var/lib/apt/lists/* /tmp/*
   printf 'docker=%s\n' "$(docker --version)"
   printf 'buildx=%s\n' "$(docker buildx version)"
   printf 'azure_cli=%s\n' "$(az version --query '"azure-cli"' -o tsv)"
+  printf 'bicep=%s\n' "$(runuser --user actions-runner -- env HOME=/home/actions-runner az bicep version)"
   printf 'azd=%s\n' "$(azd version | head -n 1)"
   printf 'powershell=%s\n' "$(pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
   printf 'aspire=%s\n' "$(aspire --version)"

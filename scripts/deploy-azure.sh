@@ -107,7 +107,7 @@ echo "Resource group:      $RESOURCE_GROUP"
 echo "Location:            $LOCATION"
 echo "Runner pools:"
 jq -r '.[] | "  \(.name): 0..\(.maxRunners) \(.vmSize) (\(.priority))"' <<<"$RUNNER_POOLS_JSON"
-echo "Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI, azd, PowerShell, Aspire"
+echo "Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 
 if [[ "$MODE" != "apply" ]]; then
   echo "Dry run only. No Azure resources were changed."

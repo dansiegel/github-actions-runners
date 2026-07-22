@@ -68,7 +68,7 @@ source "azure-arm" "runner" {
 }
 
 build {
-  name    = "avp-github-runner"
+  name    = "github-runner-image"
   sources = ["source.azure-arm.runner"]
 
   provisioner "shell" {
