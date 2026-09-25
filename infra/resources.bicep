@@ -26,8 +26,8 @@ var managedEnvironmentName = take('gha-runners-${resourceToken}-cae', 32)
 var runnerVnetName = 'gha-runners-${resourceToken}-vnet'
 var runnerSubnetName = 'runners'
 var runnerSubnetAddressPrefix = '10.42.1.0/24'
-var runnerVersion = '2.335.1'
-var runnerSha256 = '4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf'
+var runnerVersion = '2.337.0'
+var runnerSha256 = '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613'
 
 resource runnerNetworkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: 'gha-runners-${resourceToken}-nsg'

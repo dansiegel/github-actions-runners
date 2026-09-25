@@ -32,12 +32,12 @@ variable "build_vm_size" {
 
 variable "runner_version" {
   type    = string
-  default = "2.335.1"
+  default = "2.337.0"
 }
 
 variable "runner_sha256" {
   type    = string
-  default = "4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
+  default = "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
 }
 
 variable "aspire_cli_version" {

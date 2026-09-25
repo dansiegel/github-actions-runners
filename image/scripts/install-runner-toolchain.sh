@@ -130,6 +130,7 @@ printf '%s  %s\n' "$RUNNER_SHA256" "/tmp/${runner_asset}" | sha256sum --check --
 tar xzf "/tmp/${runner_asset}" -C /opt/actions-runner
 rm -f "/tmp/${runner_asset}"
 /opt/actions-runner/bin/installdependencies.sh
+printf '%s\n' "$RUNNER_VERSION" > /opt/actions-runner/.installed-version
 chown -R actions-runner:actions-runner /opt/actions-runner
 
 # Remove mutable package caches; the installed SDKs and tools remain in the

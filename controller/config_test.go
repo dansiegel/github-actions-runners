@@ -84,6 +84,7 @@ func TestCloudInitProtectsJITAndPowersOff(t *testing.T) {
 		"find /var/lib/cloud/instances",
 		"rm -f -- \"$0\"",
 		"sudo -HEu \"$RUNNER_USER\"",
+		".installed-version",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("embedded script missing %q", expected)

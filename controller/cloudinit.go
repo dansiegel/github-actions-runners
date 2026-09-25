@@ -52,13 +52,23 @@ fi
 usermod -aG docker "$RUNNER_USER"
 install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_ROOT"
 
-if [[ ! -x "$RUNNER_ROOT/run.sh" ]]; then
+# The managed image may contain an older runner. GitHub refuses job messages
+# from a deprecated runner version, so replace the tree unless this exact
+# version was installed.
+installed_version=""
+if [[ -f "$RUNNER_ROOT/.installed-version" ]]; then
+  installed_version="$(tr -d '[:space:]' < "$RUNNER_ROOT/.installed-version")"
+fi
+if [[ ! -x "$RUNNER_ROOT/run.sh" || "$installed_version" != %s ]]; then
+  rm -rf "$RUNNER_ROOT"
+  install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_ROOT"
   cd "$RUNNER_ROOT"
   curl --fail --show-error --silent --location --output "$RUNNER_ASSET" "$RUNNER_DOWNLOAD"
   printf '%%s  %%s\n' %s "$RUNNER_ASSET" | sha256sum --check --strict
   tar xzf "$RUNNER_ASSET"
   rm -f "$RUNNER_ASSET"
   ./bin/installdependencies.sh
+  printf '%%s\n' %s > "$RUNNER_ROOT/.installed-version"
   chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_ROOT"
 fi
 
@@ -73,7 +83,7 @@ rm -f -- "$0"
 
 cd "$RUNNER_ROOT"
 sudo -HEu "$RUNNER_USER" env ACTIONS_RUNNER_INPUT_JITCONFIG="$JIT_CONFIG" ./run.sh
-`, shellQuote(c.RunnerUser), shellQuote(asset), shellQuote(download), shellQuote(jitEnvelope), shellQuote(c.RunnerSHA256))
+`, shellQuote(c.RunnerUser), shellQuote(asset), shellQuote(download), shellQuote(jitEnvelope), shellQuote(c.RunnerVersion), shellQuote(c.RunnerSHA256), shellQuote(c.RunnerVersion))
 
 	return "#cloud-config\n" +
 		"package_update: false\n" +
