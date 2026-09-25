@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ type vmProvider interface {
 
 type jitProvider interface {
 	GenerateJitRunnerConfig(ctx context.Context, runnerSetting *scaleset.RunnerScaleSetJitRunnerSetting, runnerScaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
+	GetRunnerByName(ctx context.Context, runnerName string) (*scaleset.RunnerReference, error)
+	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
 type runnerLifecycle string
@@ -168,6 +171,9 @@ type AzureScaler struct {
 	provider   vmProvider
 	state      *runnerState
 	logger     *slog.Logger
+
+	provisionMu           sync.Mutex
+	provisionBlockedUntil time.Time
 }
 
 func (s *AzureScaler) HandleDesiredRunnerCount(ctx context.Context, assignedJobs int) (int, error) {
@@ -176,18 +182,67 @@ func (s *AzureScaler) HandleDesiredRunnerCount(ctx context.Context, assignedJobs
 	s.logger.Info("Reconciling desired runner capacity", "assignedJobs", assignedJobs, "current", current, "target", target, "max", s.config.MaxRunners)
 
 	if current < target {
-		// VMs already being deleted still consume Azure capacity and cost. Do
-		// not replace them until deletion completes, which keeps the hard
-		// resource ceiling at MaxRunners even during rapid queue churn.
-		availableSlots := max(0, s.config.MaxRunners-s.state.resourceCount())
-		scaleUp := min(target-current, availableSlots)
-		if err := s.scaleUp(ctx, scaleUp); err != nil {
-			return s.state.activeCount(), err
+		if s.provisionBlocked() {
+			// A quota or allocation failure must not be retried on every
+			// listener poll. Each retry mints a GitHub runner registration
+			// and, when the VM does come up, another billable disk and IP.
+			s.logger.Warn("Skipping scale-up while provisioning is paused", "assignedJobs", assignedJobs, "current", current, "target", target)
+		} else {
+			// VMs already being deleted still consume Azure capacity and cost. Do
+			// not replace them until deletion completes, which keeps the hard
+			// resource ceiling at MaxRunners even during rapid queue churn.
+			availableSlots := max(0, s.config.MaxRunners-s.state.resourceCount())
+			scaleUp := min(target-current, availableSlots)
+			if scaleUp > 0 {
+				if err := s.scaleUp(ctx, scaleUp); err != nil {
+					s.blockProvisioning(err)
+				} else {
+					s.clearProvisionBlock()
+				}
+			}
 		}
 	} else if current > target {
 		s.scaleDownIdle(current - target)
 	}
 	return s.state.activeCount(), nil
+}
+
+func (s *AzureScaler) provisionBlocked() bool {
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	return time.Now().Before(s.provisionBlockedUntil)
+}
+
+func (s *AzureScaler) blockProvisioning(err error) {
+	delay := provisionBackoffFor(err)
+	s.provisionMu.Lock()
+	until := time.Now().Add(delay)
+	if until.After(s.provisionBlockedUntil) {
+		s.provisionBlockedUntil = until
+	}
+	s.provisionMu.Unlock()
+	s.logger.Error("Pausing runner provisioning after Azure create failed", "backoff", delay.String(), "error", err)
+}
+
+func (s *AzureScaler) clearProvisionBlock() {
+	s.provisionMu.Lock()
+	s.provisionBlockedUntil = time.Time{}
+	s.provisionMu.Unlock()
+}
+
+func provisionBackoffFor(err error) time.Duration {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	switch {
+	case strings.Contains(message, "OperationNotAllowed") || strings.Contains(message, "Quota"):
+		return 10 * time.Minute
+	case strings.Contains(message, "AllocationFailed"):
+		return 5 * time.Minute
+	default:
+		return 2 * time.Minute
+	}
 }
 
 func (s *AzureScaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
@@ -244,8 +299,14 @@ func (s *AzureScaler) startRunner(ctx context.Context) (RunnerVM, error) {
 	}
 	vm, err := s.provider.Create(ctx, runnerName, jit.EncodedJITConfig)
 	if err != nil {
+		// The JIT call already registered this name with GitHub. Drop it
+		// before returning so a VM that never started cannot hold a job.
+		s.forgetGitHubRunner(context.WithoutCancel(ctx), runnerEntry{
+			RunnerVM: RunnerVM{RunnerName: runnerName, RunnerID: jitRunnerID(jit)},
+		})
 		return RunnerVM{}, fmt.Errorf("provisioning %s: %w", runnerName, err)
 	}
+	vm.RunnerID = jitRunnerID(jit)
 	s.state.addIdle(vm)
 	s.logger.Info("Provisioned ephemeral runner", "runner", runnerName, "vm", vm.VMName)
 	return vm, nil
@@ -266,6 +327,7 @@ func (s *AzureScaler) deleteRunner(runnerName, reason string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
+		s.forgetGitHubRunner(ctx, entry)
 		if err := s.provider.Delete(ctx, entry.VMName); err != nil {
 			s.logger.Error("Failed to delete ephemeral runner", "runner", runnerName, "vm", entry.VMName, "error", err)
 			s.state.deletionFailed(entry)
@@ -274,6 +336,46 @@ func (s *AzureScaler) deleteRunner(runnerName, reason string) {
 		s.state.remove(runnerName)
 		s.logger.Info("Deleted ephemeral runner", "runner", runnerName, "vm", entry.VMName)
 	}()
+}
+
+func jitRunnerID(jit *scaleset.RunnerScaleSetJitRunnerConfig) int {
+	if jit == nil || jit.Runner == nil {
+		return 0
+	}
+	return jit.Runner.ID
+}
+
+func (s *AzureScaler) forgetGitHubRunner(ctx context.Context, entry runnerEntry) {
+	runnerID := entry.RunnerID
+	if runnerID == 0 && entry.RunnerName != "" {
+		runner, err := s.jitClient.GetRunnerByName(ctx, entry.RunnerName)
+		if err != nil {
+			s.logger.Error("Failed to look up GitHub runner registration", "runner", entry.RunnerName, "error", err)
+			return
+		}
+		if runner == nil {
+			return
+		}
+		runnerID = runner.ID
+	}
+	if runnerID == 0 {
+		return
+	}
+	if err := s.jitClient.RemoveRunner(ctx, int64(runnerID)); err != nil {
+		if !isGitHubRunnerMissing(err) {
+			s.logger.Error("Failed to remove GitHub runner registration", "runner", entry.RunnerName, "runnerId", runnerID, "error", err)
+		}
+		return
+	}
+	s.logger.Info("Removed GitHub runner registration", "runner", entry.RunnerName, "runnerId", runnerID)
+}
+
+func isGitHubRunnerMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "404") || strings.Contains(strings.ToLower(message), "not found")
 }
 
 func (s *AzureScaler) AdoptExisting(ctx context.Context) error {

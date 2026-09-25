@@ -44,7 +44,8 @@ For each pool:
 5. Every new runner gets a unique JIT configuration and Azure VM using the pool's VM size.
 6. A `JobStarted` event protects the VM as busy.
 7. A `JobCompleted` event starts deletion. The VM also powers off when `run.sh` exits.
-8. The one-minute reconciler deletes stopped/deallocated VMs and hard-expired VMs.
+8. The one-minute reconciler deletes stopped/deallocated VMs and hard-expired VMs, and removes the matching GitHub runner registration.
+9. A failed VM create removes the JIT registration it just minted. Quota, allocation, and preempted-create errors pause further creates and leave the listener session running.
 
 The controller never deletes a busy runner merely because desired capacity falls. Queue-driven scale-down only removes runners still known to be idle; completed runners follow the job-completion path.
 

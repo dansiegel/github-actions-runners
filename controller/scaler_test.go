@@ -13,15 +13,50 @@ import (
 )
 
 type fakeJITClient struct {
-	mu    sync.Mutex
-	calls int
+	mu      sync.Mutex
+	calls   int
+	removed []int64
+	byName  map[string]int
 }
 
 func (f *fakeJITClient) GenerateJitRunnerConfig(_ context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
-	f.mu.Unlock()
-	return &scaleset.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: "jit-for-" + setting.Name}, nil
+	if f.byName == nil {
+		f.byName = map[string]int{}
+	}
+	id := 1000 + f.calls
+	f.byName[setting.Name] = id
+	return &scaleset.RunnerScaleSetJitRunnerConfig{
+		EncodedJITConfig: "jit-for-" + setting.Name,
+		Runner:           &scaleset.RunnerReference{ID: id, Name: setting.Name},
+	}, nil
+}
+
+func (f *fakeJITClient) GetRunnerByName(_ context.Context, runnerName string) (*scaleset.RunnerReference, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.byName[runnerName]; ok {
+		return &scaleset.RunnerReference{ID: id, Name: runnerName}, nil
+	}
+	if runnerName == "orphan-runner" {
+		return &scaleset.RunnerReference{ID: 77, Name: runnerName}, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeJITClient) RemoveRunner(_ context.Context, runnerID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, runnerID)
+	return nil
+}
+
+func (f *fakeJITClient) snapshot() (calls int, removed []int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, append([]int64(nil), f.removed...)
 }
 
 type fakeVMProvider struct {
@@ -146,10 +181,51 @@ func TestReconcilerDeletesStoppedOrphan(t *testing.T) {
 		PowerState: "PowerState/deallocated",
 	}}
 	scaler.reconcile(context.Background())
+	jit := scaler.jitClient.(*fakeJITClient)
 	waitFor(t, func() bool {
 		_, deleted := provider.counts()
-		return deleted == 1
+		_, removed := jit.snapshot()
+		return deleted == 1 && len(removed) == 1 && removed[0] == 77
 	})
+}
+
+type failingVMProvider struct {
+	fakeVMProvider
+	err error
+}
+
+func (f *failingVMProvider) Create(context.Context, string, string) (RunnerVM, error) {
+	return RunnerVM{}, f.err
+}
+
+func TestFailedProvisionRemovesRegistrationAndPauses(t *testing.T) {
+	scaler, _ := testScaler(1)
+	provider := &failingVMProvider{err: fmt.Errorf("creating VM: Azure operation Failed: {\"code\":\"OperationNotAllowed\",\"message\":\"exceeding approved standardDSv5Family Cores quota\"}")}
+	scaler.provider = provider
+	jit := scaler.jitClient.(*fakeJITClient)
+
+	count, err := scaler.HandleDesiredRunnerCount(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("provision failure must not stop the listener: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("active runners = %d, want 0", count)
+	}
+	calls, removed := jit.snapshot()
+	if calls != 1 {
+		t.Fatalf("JIT registrations = %d, want 1", calls)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed registrations = %d, want the failed runner removed", len(removed))
+	}
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("paused provision: %v", err)
+	}
+	calls, _ = jit.snapshot()
+	if calls != 1 {
+		t.Fatalf("JIT registrations during backoff = %d, want 1", calls)
+	}
 }
 
 func waitFor(t *testing.T, condition func() bool) {

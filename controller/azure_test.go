@@ -88,3 +88,50 @@ func TestAzureCreateUsesJITCustomDataWithoutRunnerIdentity(t *testing.T) {
 		t.Fatalf("image ID = %v, want %s", image["id"], config.ImageID)
 	}
 }
+
+func TestVMCreatePollsAcceptedOperationInsteadOfRetryingPut(t *testing.T) {
+	var mu sync.Mutex
+	vmPuts := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/operations/") {
+			_, _ = w.Write([]byte(`{"status":"Succeeded"}`))
+			return
+		}
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/virtualMachines/") {
+			mu.Lock()
+			vmPuts++
+			count := vmPuts
+			mu.Unlock()
+			if count > 1 {
+				t.Errorf("VM PUT was retried after Azure accepted the operation")
+			}
+			w.Header().Set("Azure-AsyncOperation", server.URL+"/operations/vm")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"code":"InternalServerError"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	config := validConfig()
+	config.ARMEndpoint = server.URL
+	config.PublicIP = false
+	manager := &AzureVMManager{
+		config:     config,
+		credential: fakeCredential{},
+		httpClient: server.Client(),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if _, err := manager.Create(context.Background(), "linux-4vcpu-abc123", "one-time-jit"); err != nil {
+		t.Fatalf("create VM: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if vmPuts != 1 {
+		t.Fatalf("VM PUT count = %d, want 1", vmPuts)
+	}
+}

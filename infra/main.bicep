@@ -68,6 +68,13 @@ param githubAppPrivateKeySecretName string = 'github-app-private-key'
 @description('Key Vault secret containing the GitHub App installation ID.')
 param githubAppInstallationIdSecretName string = 'github-app-installation-id'
 
+@description('Email notified when this resource group is forecast to exceed its monthly cost budget.')
+param budgetContactEmail string = 'dsiegel@avantipoint.com'
+
+@description('Monthly USD cost budget for the runner resource group. September 2026 ran about $65 before the same-day churn incident.')
+@minValue(1)
+param monthlyBudgetUsd int = 120
+
 var tags = {
   project: 'github-actions-runners'
   environment: environmentName
@@ -111,6 +118,8 @@ module runnerInfra 'resources.bicep' = {
     githubAppClientIdSecretName: githubAppClientIdSecretName
     githubAppPrivateKeySecretName: githubAppPrivateKeySecretName
     githubAppInstallationIdSecretName: githubAppInstallationIdSecretName
+    budgetContactEmail: budgetContactEmail
+    monthlyBudgetUsd: monthlyBudgetUsd
     tags: tags
   }
 }

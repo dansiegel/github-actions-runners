@@ -15,6 +15,8 @@ param deployController bool
 param githubAppClientIdSecretName string
 param githubAppPrivateKeySecretName string
 param githubAppInstallationIdSecretName string
+param budgetContactEmail string
+param monthlyBudgetUsd int
 param tags object
 
 var resourceToken = take(toLower(replace(environmentName, '-', '')), 12)
@@ -401,6 +403,39 @@ resource runnerControllers 'Microsoft.App/containerApps@2024-03-01' = [for (runn
     runnerLifecycleRoleAssignment
   ]
 }]
+
+resource monthlyCostBudget 'Microsoft.Consumption/budgets@2024-08-01' = {
+  name: 'gha-runners-monthly'
+  properties: {
+    category: 'Cost'
+    amount: monthlyBudgetUsd
+    timeGrain: 'Monthly'
+    timePeriod: {
+      startDate: '2026-10-01'
+      endDate: '2036-09-30'
+    }
+    notifications: {
+      actual80: {
+        enabled: true
+        operator: 'GreaterThan'
+        threshold: 80
+        contactEmails: [
+          budgetContactEmail
+        ]
+        thresholdType: 'Actual'
+      }
+      forecasted100: {
+        enabled: true
+        operator: 'GreaterThan'
+        threshold: 100
+        contactEmails: [
+          budgetContactEmail
+        ]
+        thresholdType: 'Forecasted'
+      }
+    }
+  }
+}
 
 output containerRegistryName string = containerRegistry.name
 output containerRegistryLoginServer string = containerRegistry.properties.loginServer

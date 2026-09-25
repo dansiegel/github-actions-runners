@@ -83,6 +83,8 @@ az resource list \
 - The OS disk and NIC are additionally configured with Azure `deleteOption=Delete`.
 - Runner bootstrap powers off the VM whenever the runner exits, including failure paths.
 - Reconciliation runs every minute and deletes stopped/deallocated VMs belonging to that pool.
+- Every VM deletion also removes that runner's GitHub registration. A create that fails does the same for the registration it just minted, so a dead JIT runner cannot keep a job assigned or accumulate on the organization runner list.
+- Quota errors pause provisioning for 10 minutes, allocation failures for 5 minutes, and other create failures for 2 minutes. The listener stays online during the pause.
 - A 12-hour hard lifetime limits the cost of a stuck runner.
 
 Do not manually delete a running VM unless the associated job is known to be abandoned. Ordinary scale-down deliberately protects busy and restart-unknown VMs.
@@ -134,7 +136,8 @@ After no VMs reference an old managed image, list and delete it explicitly if de
 | Symptom | Likely cause | Action |
 |---|---|---|
 | Jobs stay queued and no VM appears | Pool controller stopped, runner-group access missing, wrong `runs-on`, or GitHub App permission missing | Inspect the controller tagged for that pool and GitHub runner group |
-| VM creation returns quota/capacity error | Combined pool capacity exceeds regional/family quota or SKU capacity | Reduce a pool, request quota, or select an approved region/SKU |
+| VM creation returns quota/capacity error | Combined pool capacity exceeds regional/family quota or SKU capacity. `avp-linux` at 12 `Standard_D4s_v5` runners is 48 cores against a 50-core `standardDSv5Family` limit in `eastus2`, so a replacement VM has no headroom | The controller pauses creates after a quota error. Raise the family quota or lower pool capacity before expecting replacements to succeed |
+| Jobs stay assigned and new VMs stop without starting a job | A previous create registered a GitHub runner, then the VM died or the listener exited before that runner connected. GitHub keeps the job on the dead registration | Confirm controller logs show `Removed GitHub runner registration`. Delete leftover `avp-linux-*` runners that have no VM |
 | VM exists but runner never becomes online | Image/bootstrap failure or GitHub connectivity | Inspect VM boot diagnostics and serial console output |
 | VM deletion fails | Controller role drift or Azure operation conflict | Restore Bicep roles; reconciler retries on later passes |
 | Container App cannot start | Missing Key Vault secret, RBAC propagation, or ACR pull failure | Verify secret names, role assignments, and image reference |

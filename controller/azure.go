@@ -30,6 +30,7 @@ var errResourceNotFound = errors.New("Azure resource not found")
 
 type RunnerVM struct {
 	RunnerName string
+	RunnerID   int
 	VMName     string
 	CreatedAt  time.Time
 	PowerState string
@@ -190,6 +191,12 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		"tags":       tags,
 		"properties": vmProperties,
 	}); err != nil {
+		if isOperationPreempted(err) && m.vmExists(context.WithoutCancel(ctx), vmName) {
+			// A retried or overlapping create can cancel the operation we are
+			// polling even though the VM is still being provisioned. Keep it.
+			m.logger.Warn("VM create was preempted but the VM exists; keeping it", "vm", vmName)
+			return RunnerVM{RunnerName: runnerName, VMName: vmName, CreatedAt: createdAt, PowerState: "PowerState/starting"}, nil
+		}
 		_ = m.Delete(context.WithoutCancel(ctx), vmName)
 		return RunnerVM{}, fmt.Errorf("creating VM for %s: %w", runnerName, err)
 	}
@@ -272,6 +279,15 @@ func (m *AzureVMManager) PowerState(ctx context.Context, vmName string) (string,
 	return "PowerState/unknown", nil
 }
 
+func (m *AzureVMManager) vmExists(ctx context.Context, vmName string) bool {
+	_, err := m.get(ctx, m.vmID(azureResourceName(vmName)), computeAPIVersion)
+	return err == nil
+}
+
+func isOperationPreempted(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "OperationPreempted")
+}
+
 func (m *AzureVMManager) vmID(name string) string {
 	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s", m.config.SubscriptionID, m.config.ResourceGroup, name)
 }
@@ -348,6 +364,19 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, errResourceNotFound
 		}
+		operationURL := resp.Header.Get("Azure-AsyncOperation")
+		if operationURL == "" {
+			operationURL = resp.Header.Get("Location")
+		}
+		// Once Azure has accepted a PUT, polling is the only safe follow-up.
+		// Submitting the PUT again cancels the in-flight operation with
+		// OperationPreempted, which previously killed the scale-set listener.
+		if operationURL != "" && (containsStatus(accepted, resp.StatusCode) || resp.StatusCode >= 500) {
+			if err := m.waitForOperation(ctx, operationURL, resp.Header); err != nil {
+				return nil, err
+			}
+			return responseBody, nil
+		}
 		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 4 {
 			delay := retryDelay(resp.Header, attempt)
 			if err := sleepContext(ctx, delay); err != nil {
@@ -357,16 +386,6 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 		}
 		if !containsStatus(accepted, resp.StatusCode) {
 			return nil, fmt.Errorf("Azure ARM %s %s returned %d: %s", method, requestURL, resp.StatusCode, strings.TrimSpace(string(responseBody)))
-		}
-
-		operationURL := resp.Header.Get("Azure-AsyncOperation")
-		if operationURL == "" {
-			operationURL = resp.Header.Get("Location")
-		}
-		if operationURL != "" {
-			if err := m.waitForOperation(ctx, operationURL, resp.Header); err != nil {
-				return nil, err
-			}
 		}
 		return responseBody, nil
 	}
