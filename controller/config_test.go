@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +112,30 @@ func TestAzureResourceNamePreservesUniqueSuffix(t *testing.T) {
 	}
 	if !strings.HasSuffix(first, "aaaaaaaaaaaa") || !strings.HasSuffix(second, "bbbbbbbbbbbb") {
 		t.Fatalf("unique suffix was not preserved: %q, %q", first, second)
+	}
+}
+
+func TestOSDiskTierMappingAndDefaultPreservation(t *testing.T) {
+	for _, test := range []struct {
+		tier             string
+		configured, want int
+		rejected         bool
+	}{
+		{"", 128, 128, false}, {"", 256, 256, false}, {"P10", 128, 128, false},
+		{"P15", 128, 256, false}, {"P20", 128, 512, false}, {"P30", 128, 1024, false},
+		{"P99", 128, 0, true}, {"p20", 128, 0, true}, {"P10", 256, 0, true}, {"P20", 32, 0, true},
+	} {
+		t.Run(fmt.Sprintf("%s-size-%d", test.tier, test.configured), func(t *testing.T) {
+			config := validConfig()
+			config.OSDiskTier = test.tier
+			config.OSDiskSizeGB = test.configured
+			got, err := config.EffectiveOSDiskSizeGB()
+			if (err != nil) != test.rejected || got != test.want {
+				t.Fatalf("size=%d error=%v", got, err)
+			}
+			if (config.Validate() != nil) != test.rejected {
+				t.Fatal("configuration validation disagrees")
+			}
+		})
 	}
 }

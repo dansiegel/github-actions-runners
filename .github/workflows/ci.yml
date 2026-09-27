@@ -78,3 +78,6 @@ jobs:
             -RunnerPoolsFile runner-pools.example.json
           pwsh -NoProfile -File scripts/destroy-azure.ps1 \
             -SubscriptionId 00000000-0000-0000-0000-000000000000
+
+      - name: Verify per-pool disk opt-in and rejection
+        run: pwsh -NoProfile -File scripts/Test-RunnerDiskTier.ps1

@@ -51,6 +51,53 @@ For a single pool, command-line parameters are sufficient:
   -RunnerMaxCapacity 6
 ```
 
+## Optional OS disk performance
+
+Pool entries may set `"osDiskTier": "P20"` to select a capacity-backed Premium SSD tier for
+new ephemeral runners. Omission preserves the existing 128 GiB/P10 default. Set this only on
+the selected pool; the public example and other pools keep their existing defaults.
+
+| osDiskTier | New OS disk capacity | Sustained disk IOPS | Disk throughput |
+|---|---:|---:|---:|
+| P10 | 128 GiB | 500 | 100 MB/s |
+| P15 | 256 GiB | 1,100 | 125 MB/s |
+| P20 | 512 GiB | 2,300 | 150 MB/s |
+| P30 | 1,024 GiB | 5,000 | 200 MB/s |
+
+The controller selects the matching disk capacity during VM creation, so the tier is present
+before boot. This increases ephemeral disk capacity as well as performance; it does not resize
+an existing runner or mutate a disk after a job starts. The controller's optional
+`RUNNER_OS_DISK_SIZE_GB` setting cannot exceed a selected tier's capacity. Unknown or conflicting
+tiers fail validation before the controller allocates runner resources. Both deployment scripts
+validate the pool value and display it in dry runs; Bicep supplies `RUNNER_OS_DISK_TIER` per pool.
+
+Check the chosen VM's disk limits before activation. For example, `Standard_D4s_v5` has an
+uncached limit of 6,400 IOPS and 145 MB/s: P20's 2,300 IOPS fit, but its nominal 150 MB/s is bounded
+by the VM's 145 MB/s limit. The provisioner does not infer workload needs or silently change
+VM size. See [Microsoft's VM limits](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dsv5-series)
+and [Premium SSD tiers](https://learn.microsoft.com/en-us/azure/virtual-machines/disks-change-performance).
+
+Cost illustration, checked against the [Azure Retail Prices API](https://prices.azure.com/api/retail/prices)
+on 2026-09-27 for East US 2, USD, Premium SSD Managed Disks LRS disk meters:
+
+| Tier | Monthly retail meter | Approximate disk-hour (730 hours/month) |
+|---|---:|---:|
+| P10 | $17.92 | $0.02455 |
+| P15 | $34.56 | $0.04734 |
+| P20 | $66.56 | $0.09118 |
+| P30 | $122.88 | $0.16833 |
+
+P20 adds approximately $0.06663 per runner-hour over P10, or $0.03332 for a 30-minute disk
+lifetime. Actual charges depend on disk lifetime, region, agreement, and current prices. These
+estimates exclude VM/network charges and shared-disk mount meters. OS disks for ephemeral runners retain
+`deleteOption: Delete`; no disk remains after successful VM cleanup.
+
+Before changing a shared organization pool, inventory its consumers and total runner-hours.
+Compare a bounded run's disk pressure, job duration, and outcomes against the previous tier;
+a higher tier is not proof that unrelated DNS, registry, or application failures are fixed.
+Reverting the pool setting returns future runners to the default; already-running VMs are not
+changed. No deployment or higher-tier activation occurs merely by updating this repository.
+
 ## Azure Developer CLI values
 
 The deployment scripts set these values:
