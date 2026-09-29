@@ -40,6 +40,7 @@ type Config struct {
 	RunnerSHA256  string
 	RunnerUser    string
 	OSDiskSizeGB  int
+	OSDiskTier    string
 
 	ProvisionConcurrency int
 	ReconcileInterval    time.Duration
@@ -67,6 +68,7 @@ func LoadConfig() (Config, error) {
 		RunnerVersion:   env("RUNNER_VERSION", "2.337.0"),
 		RunnerSHA256:    env("RUNNER_SHA256", "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"),
 		RunnerUser:      env("RUNNER_USER", defaultRunnerUser),
+		OSDiskTier:      env("RUNNER_OS_DISK_TIER", ""),
 		ARMEndpoint:     strings.TrimRight(env("AZURE_ARM_ENDPOINT", defaultARMEndpoint), "/"),
 		LogLevel:        env("LOG_LEVEL", "info"),
 		GitHubApp: scaleset.GitHubAppAuth{
@@ -153,8 +155,8 @@ func (c *Config) Validate() error {
 	if c.VMPriority != "Regular" && c.VMPriority != "Spot" {
 		return fmt.Errorf("RUNNER_VM_PRIORITY must be Regular or Spot")
 	}
-	if c.OSDiskSizeGB < 64 {
-		return fmt.Errorf("RUNNER_OS_DISK_SIZE_GB must be at least 64")
+	if _, err := c.EffectiveOSDiskSizeGB(); err != nil {
+		return err
 	}
 	if c.ProvisionConcurrency < 1 || c.ProvisionConcurrency > 20 {
 		return fmt.Errorf("PROVISION_CONCURRENCY must be between 1 and 20")
@@ -250,4 +252,24 @@ func splitCSV(value string) []string {
 
 func normalizePEM(value string) string {
 	return strings.ReplaceAll(value, `\n`, "\n")
+}
+
+// EffectiveOSDiskSizeGB selects a capacity-backed Premium SSD tier at VM creation.
+// An omitted tier preserves the existing configured size; no existing disk is resized.
+func (c Config) EffectiveOSDiskSizeGB() (int, error) {
+	if c.OSDiskSizeGB < 64 {
+		return 0, fmt.Errorf("RUNNER_OS_DISK_SIZE_GB must be at least 64")
+	}
+	if c.OSDiskTier == "" {
+		return c.OSDiskSizeGB, nil
+	}
+	sizes := map[string]int{"P10": 128, "P15": 256, "P20": 512, "P30": 1024}
+	size, ok := sizes[c.OSDiskTier]
+	if !ok {
+		return 0, fmt.Errorf("RUNNER_OS_DISK_TIER must be empty, P10, P15, P20, or P30")
+	}
+	if c.OSDiskSizeGB > size {
+		return 0, fmt.Errorf("RUNNER_OS_DISK_SIZE_GB exceeds the selected RUNNER_OS_DISK_TIER capacity")
+	}
+	return size, nil
 }

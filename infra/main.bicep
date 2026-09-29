@@ -38,7 +38,7 @@ param runnerImageId string = ''
 ])
 param runnerVmPriority string = 'Regular'
 
-@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, maxRunners, priority, and labels. Empty uses the single-pool parameters for compatibility.')
+@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, maxRunners, priority, labels, and optional osDiskTier. Empty uses the single-pool parameters for compatibility.')
 param runnerPoolsBase64 string = ''
 
 @description('Linux admin user for emergency access. The subnet NSG denies inbound Internet traffic.')

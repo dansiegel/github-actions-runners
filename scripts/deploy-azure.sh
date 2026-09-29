@@ -77,6 +77,8 @@ if [[ -n "$RUNNER_POOLS_FILE" ]]; then
         | if (.maxRunners | type) != "number" or (.maxRunners | floor) != .maxRunners or .maxRunners < 1 or .maxRunners > 20 then error("maxRunners must be 1-20 for " + .name) else . end
         | .priority = (.priority // "Regular")
         | if (.priority != "Regular" and .priority != "Spot") then error("priority must be Regular or Spot for " + .name) else . end
+        | .osDiskTier = (if .osDiskTier == null then "" else .osDiskTier end)
+        | if (.osDiskTier != "" and .osDiskTier != "P10" and .osDiskTier != "P15" and .osDiskTier != "P20" and .osDiskTier != "P30") then error("invalid osDiskTier for " + .name) else . end
         | .labels = (
             if (.labels | type) == "array" and (.labels | length) > 0
             then [.labels[] | tostring | gsub("^\\s+|\\s+$"; "") | select(length > 0)]
@@ -111,7 +113,7 @@ echo "GitHub organization: $GITHUB_ORGANIZATION"
 echo "Resource group:      $RESOURCE_GROUP"
 echo "Location:            $LOCATION"
 echo "Runner pools:"
-jq -r '.[] | "  \(.name): 0..\(.maxRunners) \(.vmSize) (\(.priority))"' <<<"$RUNNER_POOLS_JSON"
+jq -r '.[] | "  \(.name): 0..\(.maxRunners) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
 echo "Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 
 if [[ "$MODE" != "apply" ]]; then

@@ -48,7 +48,7 @@ function Get-NormalizedRunnerPools {
         if (-not (Test-Path -LiteralPath $RunnerPoolsFile -PathType Leaf)) {
             throw "Runner pool configuration not found: $RunnerPoolsFile"
         }
-        $parsedPools = Get-Content -LiteralPath $RunnerPoolsFile -Raw | ConvertFrom-Json
+        $parsedPools = Get-Content -LiteralPath $RunnerPoolsFile -Raw | ConvertFrom-Json -NoEnumerate
         if ($parsedPools -isnot [Array]) {
             throw 'Runner pool configuration must be a JSON array'
         }
@@ -85,6 +85,11 @@ function Get-NormalizedRunnerPools {
             throw "Runner pool '$name' priority must be Regular or Spot"
         }
 
+        $osDiskTier = ([string] $pool.osDiskTier).Trim()
+        if ($osDiskTier -cnotin @('', 'P10', 'P15', 'P20', 'P30')) {
+            throw "Runner pool '$name' osDiskTier must be P10, P15, P20, or P30"
+        }
+
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
         $normalized += [ordered]@{
@@ -92,6 +97,7 @@ function Get-NormalizedRunnerPools {
             vmSize     = $vmSize
             maxRunners = $maxRunners
             priority   = $priority
+            osDiskTier = $osDiskTier
             labels     = $labels
         }
     }
@@ -109,7 +115,7 @@ Write-Host "Resource group:      $ResourceGroup"
 Write-Host "Location:            $Location"
 Write-Host 'Runner pools:'
 foreach ($pool in $runnerPools) {
-    Write-Host ("  {0}: 0..{1} {2} ({3})" -f $pool.name, $pool.maxRunners, $pool.vmSize, $pool.priority)
+    Write-Host ("  {0}: 0..{1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $pool.maxRunners, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
 }
 Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 

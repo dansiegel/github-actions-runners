@@ -135,3 +135,57 @@ func TestVMCreatePollsAcceptedOperationInsteadOfRetryingPut(t *testing.T) {
 		t.Fatalf("VM PUT count = %d, want 1", vmPuts)
 	}
 }
+
+func TestAzureCreateSelectsCapacityBackedDiskTierBeforeBoot(t *testing.T) {
+	for _, test := range []struct {
+		tier string
+		want int
+	}{{"", 128}, {"P20", 512}} {
+		t.Run(test.tier, func(t *testing.T) {
+			var disk map[string]any
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if strings.Contains(r.URL.Path, "/virtualMachines/") {
+					mu.Lock()
+					disk = body["properties"].(map[string]any)["storageProfile"].(map[string]any)["osDisk"].(map[string]any)
+					mu.Unlock()
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+			config := validConfig()
+			config.ARMEndpoint = server.URL
+			config.OSDiskTier = test.tier
+			manager := &AzureVMManager{config: config, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if _, err := manager.Create(context.Background(), "disk-tier-test", "jit"); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if disk["diskSizeGB"] != float64(test.want) || disk["deleteOption"] != "Delete" || disk["managedDisk"].(map[string]any)["storageAccountType"] != "Premium_LRS" {
+				t.Fatalf("unexpected disk: %#v", disk)
+			}
+		})
+	}
+}
+
+func TestAzureCreateRejectsDiskTierBeforeAllocatingResources(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("invalid disk configuration reached Azure")
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+	config := validConfig()
+	config.ARMEndpoint = server.URL
+	config.OSDiskTier = "P99"
+	manager := &AzureVMManager{config: config, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if _, err := manager.Create(context.Background(), "invalid-disk", "jit"); err == nil {
+		t.Fatal("invalid tier accepted")
+	}
+}

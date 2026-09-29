@@ -65,6 +65,10 @@ func NewAzureVMManager(config Config, logger *slog.Logger) (*AzureVMManager, err
 }
 
 func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfig string) (RunnerVM, error) {
+	diskSize, err := m.config.EffectiveOSDiskSizeGB()
+	if err != nil {
+		return RunnerVM{}, err
+	}
 	vmName := azureResourceName(runnerName)
 	createdAt := time.Now().UTC()
 	tags := map[string]string{
@@ -158,7 +162,7 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 			"osDisk": map[string]any{
 				"createOption": "FromImage",
 				"deleteOption": "Delete",
-				"diskSizeGB":   m.config.OSDiskSizeGB,
+				"diskSizeGB":   diskSize,
 				"caching":      "ReadWrite",
 				"managedDisk": map[string]any{
 					"storageAccountType": "Premium_LRS",

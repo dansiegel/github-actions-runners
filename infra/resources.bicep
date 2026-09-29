@@ -341,6 +341,10 @@ resource runnerControllers 'Microsoft.App/containerApps@2024-03-01' = [for (runn
               value: runnerPool.vmSize
             }
             {
+              name: 'RUNNER_OS_DISK_TIER'
+              value: runnerPool.?osDiskTier ?? ''
+            }
+            {
               name: 'RUNNER_IMAGE_ID'
               value: runnerImageId
             }

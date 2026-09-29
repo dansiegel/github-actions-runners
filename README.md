@@ -66,6 +66,9 @@ Copy [runner-pools.example.json](runner-pools.example.json) to a deployment-priv
 
 The pool `name` is the GitHub runner scale-set name and the value workflows use in `runs-on`. It is separate from the timestamped Azure managed-image name. Pool order is stable configuration: pool zero retains the original controller resource name for safe upgrades of existing single-pool installations.
 
+An optional per-pool `osDiskTier` selects higher sustained Premium SSD performance by increasing
+the new ephemeral OS disk capacity. It is off by default; review the [mapping, VM limits, and cost](docs/configuration.md#optional-os-disk-performance) before opting in.
+
 For one pool, omit the JSON file and pass `-RunnerScaleSetName`, `-RunnerVmSize`, and `-RunnerMaxCapacity` (or the equivalent Bash flags).
 
 ## Deploy
