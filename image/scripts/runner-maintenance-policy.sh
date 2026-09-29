@@ -6,7 +6,7 @@ package_services=(apt-daily.service apt-daily-upgrade.service)
 maintenance_units=("${maintenance_timers[@]}" "${package_services[@]}" unattended-upgrades.service fwupd-refresh.service fwupd.service)
 
 prepare_maintenance_policy() {
-  local root="${1:-}" attempts="${2:-120}" busy unit
+  local root="${1:-}" attempts="${2:-120}" busy unit state
   # Stop future scheduling first. Let any package transaction already running
   # finish; stopping dpkg mid-transaction is not a safe way to prepare an image.
   for unit in "${maintenance_timers[@]}"; do
@@ -17,7 +17,12 @@ prepare_maintenance_policy() {
   while true; do
     busy=false
     for unit in "${package_services[@]}"; do
-      if systemctl is-active --quiet "$unit"; then busy=true; fi
+      state="$(systemctl show --property=ActiveState --value "$unit")" || return
+      case "$state" in
+        inactive|failed) ;;
+        active|activating|deactivating|reloading|refreshing) busy=true ;;
+        *) printf 'Unknown package service state: %s (%s)\n' "$unit" "$state" >&2; return 1 ;;
+      esac
     done
     if [[ "$busy" == false ]]; then break; fi
     if (( attempts == 0 )); then
@@ -31,9 +36,12 @@ prepare_maintenance_policy() {
   # service too so D-Bus activation cannot bypass the disabled refresh timer.
   systemctl mask "${maintenance_units[@]}" || return
   for unit in unattended-upgrades.service fwupd-refresh.service fwupd.service; do
-    if systemctl is-active --quiet "$unit"; then
-      systemctl stop "$unit" || return
-    fi
+    state="$(systemctl show --property=ActiveState --value "$unit")" || return
+    case "$state" in
+      inactive|failed) ;;
+      active|activating|deactivating|reloading|refreshing) systemctl stop "$unit" || return ;;
+      *) printf 'Unknown maintenance state: %s (%s)\n' "$unit" "$state" >&2; return 1 ;;
+    esac
   done
   install -d -m 0755 "$root/etc/apt/apt.conf.d"
   cat > "$root/etc/apt/apt.conf.d/99-runner-image-maintenance" <<'POLICY'
@@ -52,10 +60,11 @@ verify_maintenance_policy() {
       printf 'Expected masked image maintenance unit: %s (found %s)\n' "$unit" "$state" >&2
       return 1
     fi
-    if systemctl is-active --quiet "$unit"; then
-      printf 'Image maintenance unit is unexpectedly active: %s\n' "$unit" >&2
-      return 1
-    fi
+    state="$(systemctl show --property=ActiveState --value "$unit")" || return
+    case "$state" in
+      inactive|failed) ;;
+      *) printf 'Image maintenance unit is not quiet: %s (%s)\n' "$unit" "$state" >&2; return 1 ;;
+    esac
   done
   # Validate the effective configuration, including precedence over vendor files.
   local apt_policy

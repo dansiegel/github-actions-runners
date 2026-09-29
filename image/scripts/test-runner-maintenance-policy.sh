@@ -12,12 +12,19 @@ active_verify=false
 bad_policy=false
 missing_timer=false
 fail_stop=false
+bad_query=false
 
 systemctl() {
   printf '%s\n' "$*" >> "$events"
   case "$1" in
     show)
-      if [[ "$missing_timer" == true && "${@: -1}" == fwupd-refresh.timer ]]; then
+      if [[ "$*" == *--property=ActiveState* ]]; then
+        if [[ "$bad_query" == true ]]; then return 2; fi
+        if [[ "$active_verify" == true ]]; then printf 'activating\n'
+        elif [[ "${@: -1}" == apt-daily-upgrade.service && $(grep -c '^show --property=ActiveState --value apt-daily-upgrade.service$' "$events") -le $busy_polls ]]; then
+          printf 'activating\n'
+        else printf 'inactive\n'; fi
+      elif [[ "$missing_timer" == true && "${@: -1}" == fwupd-refresh.timer ]]; then
         printf 'not-found\n'
       else printf 'loaded\n'; fi ;;
     stop) [[ "$fail_stop" == false ]] ;;
@@ -71,6 +78,12 @@ fi
 ! grep -q '^mask ' "$events"
 fail_stop=false
 printf 'PASS: timer-stop failure does not proceed with maintenance changes\n'
+
+bad_query=true
+if prepare_maintenance_policy "$fixture" 1; then exit 1; fi
+if verify_maintenance_policy; then exit 1; fi
+bad_query=false
+printf 'PASS: failed ActiveState queries prevent preparation and verification\n'
 
 enabled_state=enabled
 if verify_maintenance_policy; then exit 1; fi
