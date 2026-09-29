@@ -40,6 +40,7 @@ apt-config() {
 
 busy_polls=2
 prepare_maintenance_policy "$fixture" 2
+! grep -Eq '^stop apt-daily(-upgrade)?\.service|^mask --now' "$events"
 [[ $(grep -c '^wait$' "$events") == 2 ]]
 [[ $(grep -n '^mask ' "$events" | cut -d: -f1) -gt $(grep -n '^wait$' "$events" | tail -1 | cut -d: -f1) ]]
 verify_maintenance_policy

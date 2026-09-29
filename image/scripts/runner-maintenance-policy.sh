@@ -29,7 +29,12 @@ prepare_maintenance_policy() {
   done
   # fwupd has no firmware-management role on a disposable Azure VM. Mask its
   # service too so D-Bus activation cannot bypass the disabled refresh timer.
-  systemctl mask --now "${maintenance_units[@]}" || return
+  systemctl mask "${maintenance_units[@]}" || return
+  for unit in unattended-upgrades.service fwupd-refresh.service fwupd.service; do
+    if systemctl is-active --quiet "$unit"; then
+      systemctl stop "$unit" || return
+    fi
+  done
   install -d -m 0755 "$root/etc/apt/apt.conf.d"
   cat > "$root/etc/apt/apt.conf.d/99-runner-image-maintenance" <<'POLICY'
 // Apply updates while building the immutable image, never during its one CI job.
