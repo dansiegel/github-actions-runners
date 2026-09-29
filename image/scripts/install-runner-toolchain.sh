@@ -4,11 +4,16 @@ set -Eeuo pipefail
 : "${RUNNER_VERSION:?RUNNER_VERSION is required}"
 : "${RUNNER_SHA256:?RUNNER_SHA256 is required}"
 : "${ASPIRE_CLI_VERSION:?ASPIRE_CLI_VERSION is required}"
+: "${BASE_IMAGE_VERSION:?BASE_IMAGE_VERSION is required}"
 
 export DEBIAN_FRONTEND=noninteractive
 install -d -m 0755 /etc/apt/keyrings /opt/runner-image
 
+/usr/local/sbin/runner-maintenance-policy prepare
 apt-get update
+# Security updates are baked into the immutable image. Package maintenance must
+# finish before a runner can accept work; live jobs never run unattended upgrades.
+apt-get -o DPkg::Lock::Timeout=600 full-upgrade -y
 apt-get install -y --no-install-recommends \
   apt-transport-https \
   build-essential \
@@ -142,6 +147,7 @@ rm -rf /var/lib/apt/lists/* /tmp/*
 
 {
   printf 'built_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'base_image=Canonical:ubuntu-24_04-lts:server:%s\n' "$BASE_IMAGE_VERSION"
   printf 'runner=%s\n' "$RUNNER_VERSION"
   printf 'dotnet_sdks=%s\n' "$(dotnet --list-sdks | paste -sd ',' -)"
   printf 'node=%s\n' "$(node --version)"

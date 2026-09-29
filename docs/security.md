@@ -61,6 +61,26 @@ The Actions runner archive is pinned to a version and SHA-256. Aspire CLI is ver
 
 For stricter reproducibility, mirror and pin every package in an internal feed, verify installer-script hashes, scan the managed image, and sign an image provenance record before production rollout.
 
+## Immutable OS maintenance
+
+Image creation applies stable signed package updates synchronously before installing the
+toolchain. It stops automatic timer scheduling, waits up to ten minutes for any existing
+package maintenance to finish, and fails instead of killing an active package transaction.
+Automatic apt updates, unattended upgrades and firmware refresh units are then masked;
+the effective APT periodic settings are disabled. These disposable Azure VMs must not
+change packages or perform firmware maintenance while a CI job is running.
+
+The builder reboots before capture and verifies the masks, effective package policy,
+completed package transactions and toolchain. The manifest records the booted kernel
+and a hash of the complete installed-package inventory in `packages.tsv`.
+
+Disabling live maintenance makes immutable image refresh an operational requirement:
+the pool owner must rebuild and validate at least weekly and promptly for applicable
+critical security updates. A source merge does not update a deployed image. Retain the
+previous immutable image for rollback and record each pool's selected image and build
+date. Do not deploy this policy without an owner for that refresh cadence. This policy
+does not apply to long-lived hosts and does not claim a particular kernel regression is fixed.
+
 ## Logging and incident response
 
 Controller logs go to Log Analytics. Runner bootstrap and runner diagnostic tails are written to the serial console and captured by managed boot diagnostics. GitHub retains workflow job logs.

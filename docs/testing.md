@@ -51,6 +51,7 @@ Syntax-check deployment/image scripts:
 bash -n scripts/deploy-azure.sh
 bash -n scripts/destroy-azure.sh
 bash -n image/scripts/install-runner-toolchain.sh
+bash image/scripts/test-runner-maintenance-policy.sh
 ```
 
 The Packer build aliases the Canonical package installation to
@@ -58,6 +59,23 @@ The Packer build aliases the Canonical package installation to
 `actions-runner` account. This makes reuse of the baked SDK and compatibility
 with the default Linux install directory used by `actions/setup-dotnet` image-
 build invariants.
+
+Maintenance-policy tests exercise a package transaction finishing before masking, the
+bounded wait expiring without stopping that transaction, an absent optional timer,
+timer-stop failure, and verification rejecting enabled/active units or overridden APT
+settings. They mock systemd, so the real candidate image must also reboot and pass
+`verify-runner-image.sh` before capture.
+
+For a candidate rollout, record the image resource ID, manifest, booted kernel, package
+inventory hash and previous image ID. Run an isolated candidate job with unchanged test
+budgets and inspect maintenance unit/process state during the job. Only then choose a
+controller rollout. Reverting `RUNNER_IMAGE_ID` affects future VMs; leave active jobs
+and their disks alone. An image update does not establish that unrelated TCP or storage
+failures are fixed.
+
+Pass `-var base_image_version=<exact marketplace version>` to Packer for a candidate
+comparison; the default `latest` deliberately accepts current base images for routine
+refreshes. The selected base reference is included in the image manifest.
 
 The image build also validates the runner-specific sudoers file with `visudo`
 and executes `sudo --non-interactive true` as `actions-runner`. This preserves

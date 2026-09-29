@@ -63,6 +63,11 @@ jobs:
           bash -n scripts/deploy-azure.sh
           bash -n scripts/destroy-azure.sh
           bash -n image/scripts/install-runner-toolchain.sh
+          bash -n image/scripts/runner-maintenance-policy.sh
+          bash -n image/scripts/verify-runner-image.sh
+
+      - name: Test image maintenance policy
+        run: bash image/scripts/test-runner-maintenance-policy.sh
 
       - name: Verify safe dry runs
         run: |
