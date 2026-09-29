@@ -136,7 +136,13 @@ Every Container App resolves the same secrets through the shared user-assigned i
 
 `image/runner.pkr.hcl` builds one Ubuntu 24.04 managed image shared by all pools. Its contents include GitHub Actions runner 2.337.0, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and Bicep CLI, `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools. A VM still replaces the baked runner when `.installed-version` does not match `RUNNER_VERSION`, because GitHub rejects job messages from a deprecated runner build.
 
-Resolved versions are written to `/opt/runner-image/manifest.txt`. Rebuild the image deliberately to accept upstream package updates. `-RunnerImageNamePrefix` / `--runner-image-name-prefix` controls the Azure image-name prefix; it does not affect workflow labels.
+Resolved versions, the verified booted kernel and the package-inventory hash are written
+to `/opt/runner-image/manifest.txt`; `/opt/runner-image/packages.tsv` contains the installed
+package inventory. Image creation applies stable OS updates and verifies the image after
+a reboot. Automatic apt and firmware maintenance is disabled for the disposable job
+lifetime. Follow the [immutable-image refresh policy](security.md#immutable-os-maintenance)
+for security updates. `-RunnerImageNamePrefix` / `--runner-image-name-prefix` controls the
+Azure image-name prefix; it does not affect workflow labels.
 
 ## Capacity and quota
 
