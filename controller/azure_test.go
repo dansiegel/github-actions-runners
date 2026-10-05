@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -187,5 +188,51 @@ func TestAzureCreateRejectsDiskTierBeforeAllocatingResources(t *testing.T) {
 	manager := &AzureVMManager{config: config, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if _, err := manager.Create(context.Background(), "invalid-disk", "jit"); err == nil {
 		t.Fatal("invalid tier accepted")
+	}
+}
+
+func TestAzureListFollowsPagesAndIsolatesProfiles(t *testing.T) {
+	var server *httptest.Server
+	config := validConfig()
+	path := "/subscriptions/" + config.SubscriptionID + "/resourceGroups/" + config.ResourceGroup + "/providers/Microsoft.Compute/virtualMachines"
+	vm := func(name, pool string) map[string]any {
+		return map[string]any{"name": name, "tags": map[string]string{"managed-by":"gha-runner-scale-controller", "runner-scale-set":pool, "github-runner-name":name, "runner-created-at":time.Now().UTC().Format(time.RFC3339)}}
+	}
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/instanceView") {
+			if strings.Contains(r.URL.Path,"deleted-vm") { w.WriteHeader(http.StatusNotFound); return }
+			json.NewEncoder(w).Encode(map[string]any{"statuses":[]map[string]string{{"code":"PowerState/running"}}})
+			return
+		}
+		if r.URL.Path != path { json.NewEncoder(w).Encode(map[string]any{"value":[]any{}}); return }
+		if r.URL.Query().Get("page") == "2" {
+			json.NewEncoder(w).Encode(map[string]any{"value":[]any{vm("runner-two",config.ScaleSetName),vm("other-profile","other"),vm("deleted-vm",config.ScaleSetName)}})
+		} else {
+			json.NewEncoder(w).Encode(map[string]any{"value":[]any{vm("runner-one",config.ScaleSetName)},"nextLink":server.URL+path+"?page=2"})
+		}
+	}))
+	defer server.Close()
+	config.ARMEndpoint = server.URL
+	manager := &AzureVMManager{config:config,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
+	runners, err := manager.List(context.Background())
+	if err != nil { t.Fatal(err) }
+	if len(runners) != 2 || runners[0].RunnerName != "runner-one" || runners[1].RunnerName != "runner-two" { t.Fatalf("unexpected inventory: %+v", runners) }
+}
+
+func TestAzureListRejectsForeignAndCyclicPagination(t *testing.T) {
+	for _, foreign := range []bool{false,true} {
+		t.Run(fmt.Sprintf("foreign-%t",foreign),func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+				next := server.URL+r.URL.RequestURI()
+				if foreign { next = "https://unrelated.invalid/steal-token" }
+				json.NewEncoder(w).Encode(map[string]any{"value":[]any{},"nextLink":next})
+			}))
+			defer server.Close()
+			config := validConfig();config.ARMEndpoint=server.URL
+			manager := &AzureVMManager{config:config,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
+			if _,err:=manager.List(context.Background());err==nil { t.Fatal("invalid pagination accepted") }
+		})
 	}
 }

@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -52,12 +55,129 @@ func TestConfigRequiresScaleToZero(t *testing.T) {
 	}
 }
 
-func TestConfigCapsEachPoolAtTwenty(t *testing.T) {
-	config := validConfig()
-	config.MaxRunners = 21
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "between 1 and 20") {
-		t.Fatalf("expected capacity validation error, got %v", err)
+func TestConfigAllowsUncappedAndExplicitCapacity(t *testing.T) {
+	for _, cap := range []int{0, 1, 21, 1000, math.MaxInt32} {
+		config := validConfig()
+		config.MaxRunners = cap
+		if err := config.Validate(); err != nil {
+			t.Fatalf("capacity %d: %v", cap, err)
+		}
+		want := cap
+		if cap == 0 { want = math.MaxInt32 }
+		if config.ListenerMaxRunners() != want { t.Fatalf("capacity %d not translated correctly", cap) }
 	}
+	config := validConfig()
+	config.MaxRunners = -1
+	if config.Validate() == nil { t.Fatal("negative capacity accepted") }
+}
+
+func TestPoolConfigurationIsolationAndDisabledProfiles(t *testing.T) {
+	config := validConfig()
+	config.MaxRunners = 8 // Legacy value must not leak into omitted pool caps.
+	disabled := false
+	for i := range 10 {
+		config.Pools = append(config.Pools, RunnerPool{Name: fmt.Sprintf("profile-%d", i), VMSize: "Standard_D4s_v5", OSDiskTier: "P20"})
+	}
+	config.Pools[0].Enabled = &disabled
+	pools, err := config.PoolConfigs()
+	if err != nil { t.Fatal(err) }
+	if len(pools) != 9 { t.Fatalf("enabled profiles = %d", len(pools)) }
+	for _, pool := range pools {
+		if pool.MaxRunners != 0 || pool.MinRunners != 0 || pool.OSDiskTier != "P20" || pool.ImageID != config.ImageID { t.Fatalf("profile leaked configuration: %+v", pool) }
+		if len(pool.Labels) != 1 || pool.Labels[0] != pool.ScaleSetName { t.Fatal("profile label mismatch") }
+	}
+	pools[0].Labels[0] = "changed"
+	if pools[1].Labels[0] == "changed" { t.Fatal("profiles share mutable labels") }
+}
+
+func TestPoolConfigurationRejectsAmbiguousAndInvalidProfiles(t *testing.T) {
+	for _, raw := range []string{
+		`[{"name":"same","vmSize":"Standard_D4s_v5"},{"name":"SAME","vmSize":"Standard_D4s_v5"}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","labels":["shared"]},{"name":"two","vmSize":"Standard_D4s_v5","labels":["SHARED"]}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","enabled":false}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","maxRunners":-1}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","maxRunners":null}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","maxRunners":1.5}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","enabled":null}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","enabled":"false"}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","osDiskTier":"P99"}]`,
+		`[{"name":"one","vmSize":"wrong"}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","maxRunner":20}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","maxrunners":null}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","imageId":null}]`,
+		`[{"name":"one","vmSize":"Standard_D4s_v5","imageId":42}]`,
+	} {
+		config := validConfig()
+		if err := json.Unmarshal([]byte(raw), &config.Pools); err == nil {
+			if err := config.Validate(); err == nil { t.Fatalf("invalid configuration accepted: %s", raw) }
+		}
+	}
+}
+
+func TestExampleProfilesResolveToRequestedHardwareAndDisk(t *testing.T) {
+	data, err := os.ReadFile("../runner-pools.example.json")
+	if err != nil { t.Fatal(err) }
+	config := validConfig()
+	if err := json.Unmarshal(data, &config.Pools); err != nil { t.Fatal(err) }
+	if len(config.Pools) != 8 { t.Fatalf("profile count = %d", len(config.Pools)) }
+	pools, err := config.PoolConfigs()
+	if err != nil { t.Fatal(err) }
+	if len(pools) != 6 { t.Fatalf("qualified profiles = %d", len(pools)) }
+	seen := make(map[string]bool)
+	for _, pool := range pools {
+		key := pool.VMSize+"/"+pool.OSDiskTier
+		if seen[key] { t.Fatalf("duplicate hardware profile %s",key) }
+		seen[key] = true
+		size, err := pool.EffectiveOSDiskSizeGB()
+		if err != nil || (pool.OSDiskTier == "P10" && size != 128) || (pool.OSDiskTier == "P20" && size != 512) { t.Fatalf("wrong disk for %s: %d %v",key,size,err) }
+		if pool.MaxRunners != 0 { t.Fatal("example profile has an artificial cap") }
+	}
+	for _, sku := range []string{"Standard_D2s_v5","Standard_D4s_v5","Standard_D8s_v5"} {
+		for _, tier := range []string{"P10","P20"} { if !seen[sku+"/"+tier] { t.Fatalf("missing profile %s/%s",sku,tier) } }
+	}
+}
+
+func TestLegacySingleProfileRemainsCompatible(t *testing.T) {
+	config := validConfig()
+	pools, err := config.PoolConfigs()
+	if err != nil { t.Fatal(err) }
+	if len(pools) != 1 || pools[0].ScaleSetName != config.ScaleSetName || pools[0].MaxRunners != config.MaxRunners || pools[0].OSDiskSizeGB != config.OSDiskSizeGB { t.Fatal("legacy configuration changed") }
+}
+
+func TestProfileImageOverridesKeepSharedFallback(t *testing.T) {
+	config := validConfig()
+	config.ImageID = "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/images/shared"
+	config.Pools = []RunnerPool{
+		{Name:"shared",VMSize:"Standard_D4s_v5"},
+		{Name:"override",VMSize:"Standard_D4s_v5",ImageID:"  /subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/images/override  "},
+		{Name:"empty",VMSize:"Standard_D4s_v5",ImageID:"  "},
+	}
+	pools,err := config.PoolConfigs()
+	if err != nil {t.Fatal(err)}
+	if pools[0].ImageID != config.ImageID || pools[2].ImageID != config.ImageID {t.Fatal("shared image fallback changed")}
+	if pools[1].ImageID != "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/images/override" {t.Fatal("profile image override was not applied")}
+}
+
+func TestLegacyRunnerIdentityHardwareAndImageRemainPinned(t *testing.T) {
+	config := validConfig()
+	config.MaxRunners = 8
+	config.ImageID = "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/images/new-shared"
+	legacyImage := "/subscriptions/test/resourceGroups/test/providers/Microsoft.Compute/images/qualified-legacy"
+	config.Pools = []RunnerPool{{
+		Name:"avp-linux", VMSize:"Standard_D4s_v5", Priority:"Regular", OSDiskTier:"P10", ImageID:legacyImage,
+		Labels:[]string{"avp-linux","avp-linux-l"},
+	}}
+	pools,err := config.PoolConfigs()
+	if err != nil {t.Fatal(err)}
+	legacy := pools[0]
+	diskSize,err := legacy.EffectiveOSDiskSizeGB()
+	if err != nil {t.Fatal(err)}
+	if legacy.ScaleSetName != "avp-linux" || legacy.VMSize != "Standard_D4s_v5" || legacy.ImageID != legacyImage || diskSize != 128 || legacy.VMPriority != "Regular" || legacy.RunnerGroup != config.RunnerGroup || legacy.RegistrationURL != config.RegistrationURL {
+		t.Fatal("legacy identity, hardware, image, or ownership changed")
+	}
+	labels := legacy.ScaleSetLabels()
+	if len(labels) != 2 || labels[0].Name != "avp-linux" || labels[1].Name != "avp-linux-l" {t.Fatal("legacy label or alias changed")}
+	if legacy.MaxRunners != 0 {t.Fatal("legacy environment cap leaked into uncapped profile")}
 }
 
 func TestCloudInitProtectsJITAndPowersOff(t *testing.T) {

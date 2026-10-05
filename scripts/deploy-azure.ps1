@@ -13,8 +13,9 @@ param(
     [string] $RunnerPoolsFile = '',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')]
     [string] $RunnerScaleSetName = 'azure-linux',
-    [ValidateRange(1, 20)]
-    [int] $RunnerMaxCapacity = 10,
+    [ValidatePattern('^[0-9]+$')]
+    [ValidateScript({ [decimal] $_ -le [int]::MaxValue })]
+    [string] $RunnerMaxCapacity = '0',
     [string] $RunnerVmSize = 'Standard_D4s_v5',
     [ValidateSet('Regular', 'Spot')]
     [string] $RunnerVmPriority = 'Regular',
@@ -39,7 +40,7 @@ function Get-NormalizedRunnerPools {
         $sourcePools = @([pscustomobject]@{
             name       = $RunnerScaleSetName
             vmSize     = $RunnerVmSize
-            maxRunners = $RunnerMaxCapacity
+            maxRunners = [int] $RunnerMaxCapacity
             priority   = $RunnerVmPriority
             labels     = $labels
         })
@@ -55,13 +56,22 @@ function Get-NormalizedRunnerPools {
         $sourcePools = @($parsedPools)
     }
 
-    if ($sourcePools.Count -lt 1 -or $sourcePools.Count -gt 8) {
-        throw 'Runner pool configuration must contain between 1 and 8 pools'
+    if ($sourcePools.Count -lt 1) {
+        throw 'Runner pool configuration must contain at least one pool'
     }
 
     $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $allLabels = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $normalized = @()
     foreach ($pool in $sourcePools) {
+        if ($pool -isnot [pscustomobject]) {
+            throw 'Each runner pool must be a JSON object'
+        }
+        foreach ($property in $pool.PSObject.Properties.Name) {
+            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId')) {
+                throw "Unknown runner pool configuration field: $property"
+            }
+        }
         $name = ([string] $pool.name).Trim()
         if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
             throw "Runner pool name '$name' must be 1-64 letters, numbers, dots, underscores, or hyphens"
@@ -75,9 +85,21 @@ function Get-NormalizedRunnerPools {
             throw "Runner pool '$name' has an invalid Azure VM size: $vmSize"
         }
 
-        $maxRunners = [int] $pool.maxRunners
-        if ($maxRunners -lt 1 -or $maxRunners -gt 20) {
-            throw "Runner pool '$name' maxRunners must be between 1 and 20"
+        $hasMaxRunners = $null -ne $pool.PSObject.Properties['maxRunners']
+        if ($hasMaxRunners) {
+            $value = $pool.maxRunners
+            $numeric = $value -is [long] -or $value -is [int] -or $value -is [double] -or $value -is [decimal]
+            if (-not $numeric -or $value -lt 0 -or $value -gt [int]::MaxValue -or [math]::Truncate($value) -ne $value) {
+                throw "Runner pool '$name' maxRunners must be an integer from 0 through 2147483647"
+            }
+        }
+        $hasEnabled = $null -ne $pool.PSObject.Properties['enabled']
+        if ($hasEnabled -and $pool.enabled -isnot [bool]) {
+            throw "Runner pool '$name' enabled must be a boolean"
+        }
+        $hasImageId = $null -ne $pool.PSObject.Properties['imageId']
+        if ($hasImageId -and $pool.imageId -isnot [string]) {
+            throw "Runner pool '$name' imageId must be a string"
         }
 
         $priority = if ($null -eq $pool.priority -or [string]::IsNullOrWhiteSpace([string] $pool.priority)) { 'Regular' } else { ([string] $pool.priority).Trim() }
@@ -92,14 +114,23 @@ function Get-NormalizedRunnerPools {
 
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
-        $normalized += [ordered]@{
+        foreach ($label in $labels) {
+            if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+        }
+        $normalizedPool = [ordered]@{
             name       = $name
             vmSize     = $vmSize
-            maxRunners = $maxRunners
             priority   = $priority
             osDiskTier = $osDiskTier
             labels     = $labels
         }
+        if ($hasMaxRunners) { $normalizedPool.maxRunners = [int] $pool.maxRunners }
+        if ($hasEnabled) { $normalizedPool.enabled = $pool.enabled }
+        if ($hasImageId) { $normalizedPool.imageId = $pool.imageId.Trim() }
+        $normalized += $normalizedPool
+    }
+    if (@($normalized | Where-Object { $_.enabled -ne $false }).Count -eq 0) {
+        throw 'At least one runner pool must be enabled'
     }
     return $normalized
 }
@@ -113,9 +144,13 @@ Write-Host "Target subscription: $SubscriptionId"
 Write-Host "GitHub organization: $GitHubOrganization"
 Write-Host "Resource group:      $ResourceGroup"
 Write-Host "Location:            $Location"
+Write-Host 'Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)'
 Write-Host 'Runner pools:'
 foreach ($pool in $runnerPools) {
-    Write-Host ("  {0}: 0..{1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $pool.maxRunners, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
+    $capacity = if ($pool.enabled -eq $false) { 'disabled' } elseif (-not $pool.maxRunners) { '0..demand (uncapped)' } else { "0..$($pool.maxRunners)" }
+    Write-Host ("  {0}: {1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $capacity, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
+    $imageSource = if ($pool.imageId) { 'pool imageId override' } else { 'shared RUNNER_IMAGE_ID' }
+    Write-Host ("  {0} labels: {1}; image: {2}" -f $pool.name, ($pool.labels -join ', '), $imageSource)
 }
 Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 
@@ -154,7 +189,7 @@ azd env set ADMIN_SSH_PUBLIC_KEY (Get-Content -LiteralPath $SshPublicKeyFile -Ra
 azd env set GITHUB_ORGANIZATION $GitHubOrganization
 azd env set RUNNER_GROUP $RunnerGroup
 azd env set RUNNER_SCALE_SET_NAME $primaryPool.name
-azd env set RUNNER_MAX_CAPACITY ([string] $primaryPool.maxRunners)
+azd env set RUNNER_MAX_CAPACITY ([string] [int] $primaryPool.maxRunners)
 azd env set RUNNER_VM_SIZE $primaryPool.vmSize
 azd env set RUNNER_VM_PRIORITY $primaryPool.priority
 azd env set RUNNER_POOLS_JSON $runnerPoolsJson
@@ -205,4 +240,4 @@ azd env set RUNNER_CONTROLLER_IMAGE "$acrLoginServer/runner-controller:$controll
 azd env set DEPLOY_RUNNER_CONTROLLER true
 azd provision --environment $EnvironmentName --no-prompt
 
-Write-Host ("Deployment complete. Workflow labels: {0}" -f (($runnerPools | ForEach-Object { $_.name }) -join ', '))
+Write-Host ("Deployment complete. Workflow labels: {0}" -f (($runnerPools | Where-Object { $_.enabled -ne $false } | ForEach-Object { $_.labels }) -join ', '))

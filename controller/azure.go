@@ -195,14 +195,16 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		"tags":       tags,
 		"properties": vmProperties,
 	}); err != nil {
-		if isOperationPreempted(err) && m.vmExists(context.WithoutCancel(ctx), vmName) {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		defer cleanupCancel()
+		if isOperationPreempted(err) && m.vmExists(cleanupCtx, vmName) {
 			// A retried or overlapping create can cancel the operation we are
 			// polling even though the VM is still being provisioned. Keep it.
 			m.logger.Warn("VM create was preempted but the VM exists; keeping it", "vm", vmName)
 			return RunnerVM{RunnerName: runnerName, VMName: vmName, CreatedAt: createdAt, PowerState: "PowerState/starting"}, nil
 		}
-		_ = m.Delete(context.WithoutCancel(ctx), vmName)
-		return RunnerVM{}, fmt.Errorf("creating VM for %s: %w", runnerName, err)
+		cleanupErr := m.Delete(cleanupCtx, vmName)
+		return RunnerVM{}, fmt.Errorf("creating VM for %s: %w", runnerName, errors.Join(err, cleanupErr))
 	}
 
 	return RunnerVM{RunnerName: runnerName, VMName: vmName, CreatedAt: createdAt, PowerState: "PowerState/starting"}, nil
@@ -223,40 +225,74 @@ func (m *AzureVMManager) Delete(ctx context.Context, vmName string) error {
 	return result
 }
 
-func (m *AzureVMManager) List(ctx context.Context) ([]RunnerVM, error) {
-	path := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines", m.config.SubscriptionID, m.config.ResourceGroup)
-	var response struct {
-		Value []struct {
-			Name string            `json:"name"`
-			Tags map[string]string `json:"tags"`
-		} `json:"value"`
-		NextLink string `json:"nextLink"`
-	}
+type taggedAzureResource struct {
+	Name string `json:"name"`
+	Tags map[string]string `json:"tags"`
+}
 
-	body, err := m.get(ctx, path, computeAPIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("listing Azure VMs: %w", err)
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("decoding Azure VM list: %w", err)
-	}
-
-	result := make([]RunnerVM, 0, len(response.Value))
-	for _, vm := range response.Value {
-		if vm.Tags["managed-by"] != "gha-runner-scale-controller" || vm.Tags["runner-scale-set"] != m.config.ScaleSetName {
-			continue
+func (m *AzureVMManager) listTaggedResources(ctx context.Context, resourceType string) ([]taggedAzureResource, error) {
+	path := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/%s", m.config.SubscriptionID, m.config.ResourceGroup, resourceType)
+	apiVersion := computeAPIVersion
+	if strings.HasPrefix(resourceType, "Microsoft.Network/") { apiVersion = networkAPIVersion }
+	next := m.resourceURL(path, apiVersion)
+	endpoint, err := url.Parse(m.config.ARMEndpoint)
+	if err != nil { return nil, fmt.Errorf("invalid ARM endpoint: %w", err) }
+	seenPages := make(map[string]bool)
+	seenNames := make(map[string]bool)
+	var result []taggedAzureResource
+	for next != "" {
+		pageURL, err := url.Parse(next)
+		if err != nil || pageURL.Scheme != endpoint.Scheme || pageURL.Host != endpoint.Host || pageURL.Path != path || pageURL.User != nil {
+			return nil, fmt.Errorf("invalid Azure pagination URL")
 		}
+		if seenPages[next] { return nil, fmt.Errorf("Azure pagination repeated a page") }
+		seenPages[next] = true
+		body, err := m.request(ctx, http.MethodGet, next, nil, http.StatusOK)
+		if err != nil { return nil, err }
+		var response struct {
+			Value []taggedAzureResource `json:"value"`
+			NextLink string `json:"nextLink"`
+		}
+		if err := json.Unmarshal(body, &response); err != nil { return nil, fmt.Errorf("decoding Azure resource list: %w", err) }
+		for _, resource := range response.Value {
+			if resource.Tags["managed-by"] != "gha-runner-scale-controller" || resource.Tags["runner-scale-set"] != m.config.ScaleSetName || seenNames[resource.Name] { continue }
+			seenNames[resource.Name] = true
+			result = append(result, resource)
+		}
+		next = response.NextLink
+	}
+	return result, nil
+}
+
+func (m *AzureVMManager) List(ctx context.Context) ([]RunnerVM, error) {
+	vms, err := m.listTaggedResources(ctx, "Microsoft.Compute/virtualMachines")
+	if err != nil { return nil, err }
+	seen := make(map[string]bool)
+	var result []RunnerVM
+	for _, vm := range vms {
 		createdAt, _ := time.Parse(time.RFC3339, vm.Tags["runner-created-at"])
 		powerState, err := m.PowerState(ctx, vm.Name)
-		if err != nil && !errors.Is(err, errResourceNotFound) {
-			m.logger.Warn("Unable to read runner power state", "vm", vm.Name, "error", err)
+		if errors.Is(err, errResourceNotFound) { continue }
+		if err != nil { m.logger.Warn("Unable to read runner power state", "vm", vm.Name, "error", err) }
+		seen[vm.Name] = true
+		result = append(result, RunnerVM{RunnerName: vm.Tags["github-runner-name"], VMName: vm.Name, CreatedAt: createdAt, PowerState: powerState})
+	}
+	// A failed create can leave only a NIC or public IP. Their existing
+	// ownership tags let a restarted controller recover that cleanup work.
+	for _, resourceType := range []string{"Microsoft.Network/networkInterfaces", "Microsoft.Network/publicIPAddresses"} {
+		resources, err := m.listTaggedResources(ctx, resourceType)
+		if err != nil { return nil, err }
+		for _, resource := range resources {
+			runnerName := resource.Tags["github-runner-name"]
+			if runnerName == "" { continue }
+			vmName := azureResourceName(runnerName)
+			if seen[vmName] { continue }
+			seen[vmName] = true
+			createdAt, _ := time.Parse(time.RFC3339, resource.Tags["runner-created-at"])
+			// Leave power state unknown; reconciliation confirms VM absence
+			// directly before deleting partially provisioned resources.
+			result = append(result, RunnerVM{RunnerName:runnerName, VMName:vmName, CreatedAt:createdAt})
 		}
-		result = append(result, RunnerVM{
-			RunnerName: vm.Tags["github-runner-name"],
-			VMName:     vm.Name,
-			CreatedAt:  createdAt,
-			PowerState: powerState,
-		})
 	}
 	return result, nil
 }

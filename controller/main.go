@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -37,6 +39,35 @@ func main() {
 }
 
 func run(ctx context.Context, config Config, logger *slog.Logger) error {
+	pools, err := config.PoolConfigs()
+	if err != nil {
+		return err
+	}
+	gate := newProvisionGate(config.ProvisionConcurrency)
+	var workers sync.WaitGroup
+	for _, pool := range pools {
+		workers.Add(1)
+		go func(pool Config) {
+			defer workers.Done()
+			poolLogger := logger.With("pool", pool.ScaleSetName)
+			for ctx.Err() == nil {
+				if err := runPool(ctx, pool, poolLogger, gate); err != nil && !errors.Is(err, context.Canceled) {
+					poolLogger.Error("Profile listener stopped; retrying in one minute", "error", err)
+				}
+				if err := sleepContext(ctx, time.Minute); err != nil {
+					return
+				}
+			}
+		}(pool)
+	}
+	logger.Info("Shared runner controller started", "profiles", len(pools), "provisionConcurrency", config.ProvisionConcurrency)
+	workers.Wait()
+	return ctx.Err()
+}
+
+func runPool(parent context.Context, config Config, logger *slog.Logger, gate *provisionGate) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	client, err := scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 		GitHubConfigURL: config.RegistrationURL,
 		GitHubAppAuth:   config.GitHubApp,
@@ -93,11 +124,6 @@ func run(ctx context.Context, config Config, logger *slog.Logger) error {
 		state:      newRunnerState(),
 		logger:     logger.WithGroup("scaler"),
 	}
-	if err := scaler.AdoptExisting(ctx); err != nil {
-		return fmt.Errorf("adopting existing runner VMs: %w", err)
-	}
-	go scaler.RunReconciler(ctx)
-
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		hostname = "controller"
@@ -108,19 +134,29 @@ func run(ctx context.Context, config Config, logger *slog.Logger) error {
 		return fmt.Errorf("creating GitHub scale set message session: %w", err)
 	}
 	defer func() {
-		if err := sessionClient.Close(context.Background()); err != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := sessionClient.Close(closeCtx); err != nil {
 			logger.Warn("Failed to close GitHub message session", "error", err)
 		}
 	}()
 
 	scaleListener, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: scaleSet.ID,
-		MaxRunners: config.MaxRunners,
+		MaxRunners: config.ListenerMaxRunners(),
 		Logger:     logger.WithGroup("listener"),
 	})
 	if err != nil {
 		return fmt.Errorf("creating runner scale listener: %w", err)
 	}
+	if err := scaler.AdoptExisting(ctx); err != nil {
+		return fmt.Errorf("adopting existing runner VMs: %w", err)
+	}
+	scaler.Start(ctx, gate)
+	defer func() {
+		cancel()
+		scaler.Wait()
+	}()
 
 	logger.Info("Runner scale controller ready", "scaleSet", config.ScaleSetName, "minRunners", 0, "maxRunners", config.MaxRunners, "vmSize", config.VMSize)
 	if err := scaleListener.Run(ctx, scaler); err != nil && !errors.Is(err, context.Canceled) {
