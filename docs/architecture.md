@@ -78,7 +78,7 @@ The marketplace-image fallback exists for recovery, but it installs Docker and t
 
 ## Capacity assumptions
 
-Capacity must be budgeted across all enabled pools. The example follows demand without configured runner or total-vCPU caps. Azure quota, regional SKU availability, subnet addresses, and provisioning throughput remain practical limits. Positive per-pool caps are optional and do not enforce a subscription-wide global budget. The disabled one-core profiles require a qualified Gen2/NVMe Compute Gallery image and subscription before activation.
+Capacity must be budgeted across all enabled pools. The example follows demand without configured runner or total-vCPU caps. Azure quota, regional SKU availability, subnet addresses, and provisioning throughput remain practical limits. Positive per-pool caps are optional and do not enforce a subscription-wide global budget. The disabled Linux one-core profiles require a qualified Gen2/NVMe Compute Gallery image and subscription before activation.
 
 ## Windows provisioning
 

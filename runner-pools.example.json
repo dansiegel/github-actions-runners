@@ -75,28 +75,6 @@
     "osDiskTier": "P20"
   },
   {
-    "name": "avp-windows-s",
-    "vmSize": "Standard_F1als_v7",
-    "priority": "Regular",
-    "labels": [
-      "avp-windows-s"
-    ],
-    "osDiskTier": "P10",
-    "osType": "Windows",
-    "enabled": false
-  },
-  {
-    "name": "avp-windows-sp",
-    "vmSize": "Standard_F1als_v7",
-    "priority": "Regular",
-    "labels": [
-      "avp-windows-sp"
-    ],
-    "osDiskTier": "P20",
-    "osType": "Windows",
-    "enabled": false
-  },
-  {
     "name": "avp-windows-m",
     "vmSize": "Standard_D2s_v5",
     "priority": "Regular",

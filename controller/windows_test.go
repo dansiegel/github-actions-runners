@@ -62,7 +62,15 @@ func TestWindowsCatalogIsDisabledAndMatchesLinuxHardware(t *testing.T) {
     data,err := os.ReadFile("../runner-pools.example.json")
     if err != nil { t.Fatal(err) }
     if err := json.Unmarshal(data,&c.Pools); err != nil { t.Fatal(err) }
-    for _, suffix := range []string{"s","sp","m","mp","l","lp","xl","xlp"} {
+    windowsCount := 0
+    for _, pool := range c.Pools {
+        if pool.OSType == "Windows" { windowsCount++ }
+        for _, label := range pool.Labels {
+            if label == "avp-windows-s" || label == "avp-windows-sp" { t.Fatal("excluded 2-GiB Windows profile remains in the catalog") }
+        }
+    }
+    if windowsCount != 6 { t.Fatalf("Windows catalog count = %d, want 6", windowsCount) }
+    for _, suffix := range []string{"m","mp","l","lp","xl","xlp"} {
         var linux, windows *RunnerPool
         for i := range c.Pools {
             p := &c.Pools[i]

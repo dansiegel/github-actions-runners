@@ -105,8 +105,8 @@ try {
     }
 
     $example = Get-Content (Join-Path $PSScriptRoot '../runner-pools.example.json') -Raw | ConvertFrom-Json -NoEnumerate
-    if ($example.Count -ne 16 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 10) {
-        throw 'Example must have eight Linux profiles and eight disabled Windows profiles, with Linux small profiles also disabled'
+    if ($example.Count -ne 14 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 8) {
+        throw 'Example must have eight Linux profiles and six disabled Windows profiles, with Linux small profiles also disabled'
     }
     if ($example[0].name -cne 'avp-linux') { throw 'The legacy avp-linux pool must remain first for compatibility values' }
     foreach ($profile in @(@('s', 'Standard_F1als_v7'), @('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
@@ -124,7 +124,10 @@ try {
             if ($profile[0] -cne 's' -and $null -ne $matching[0].PSObject.Properties['enabled']) { throw "Enabled example profile must use the default: $label" }
         }
     }
-    foreach ($profile in @(@('s', 'Standard_F1als_v7'), @('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
+    if (@($example | Where-Object { $_.osType -ceq 'Windows' }).Count -ne 6 -or @($example | Where-Object { $_.labels -contains 'avp-windows-s' -or $_.labels -contains 'avp-windows-sp' }).Count -ne 0) {
+        throw 'The Windows catalog supports only M/MP, L/LP, and XL/XLP'
+    }
+    foreach ($profile in @(@('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
         foreach ($premium in @($false, $true)) {
             $label = 'avp-windows-' + $profile[0] + $(if ($premium) { 'p' } else { '' })
             $tier = if ($premium) { 'P20' } else { 'P10' }

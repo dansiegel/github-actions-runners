@@ -186,7 +186,7 @@ Azure generates a unique throwaway administrator password inside each VM deploym
 
 The Windows deployment PUT is attempted once. An uncertain response is resolved by reading/polling the same deterministic deployment identity rather than resubmitting and reevaluating the default. A later fleet retry uses a new runner/VM identity after cleanup. Disabled Windows placeholders may omit `imageId`; enabling one without it fails before network resources are created. [Microsoft documents secure generated defaults](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/linter-rule-secure-parameter-default); this still requires explicit approval for the Windows provisioning/access mechanism before activation.
 
-The eight Windows labels replace only the `linux` part of the Linux names: `avp-windows-s`, `avp-windows-sp`, `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, `avp-windows-xlp`. There is no legacy Windows alias. All Windows entries are disabled in the public example. Linux entries and legacy ownership remain unchanged. `WINDOWS_RUNNER_SHA256` selects the Windows archive checksum for the common `RUNNER_VERSION`; update the baked Windows image and that checksum together.
+The six Windows labels match the medium, large, and extra-large Linux classes: `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, `avp-windows-xlp`. Windows S/SP are excluded because their 2 GiB of RAM is below the 4-GiB Visual Studio Build Tools minimum. This is the supported catalog boundary, not a claim that Windows Server cannot boot with 2 GiB. There is no legacy Windows alias. All Windows entries are disabled in the public example. Linux entries and legacy ownership remain unchanged. `WINDOWS_RUNNER_SHA256` selects the Windows archive checksum for the common `RUNNER_VERSION`; update the baked Windows image and that checksum together.
 
 ## Linux versus Windows costs
 
@@ -194,8 +194,8 @@ USD East US 2 pay-as-you-go retail rates checked 2026-10-05. Each rate includes 
 
 | Profile suffix | CPU / GiB | OS disk | Linux / hour | Windows / hour | Linux / 30 min | Windows / 30 min |
 |---|---:|---|---:|---:|---:|---:|
-| s* | 1 / 2 | P10 | $0.08505 | $0.13155 | $0.04252 | $0.06577 |
-| sp* | 1 / 2 | P20 | $0.15168 | $0.19818 | $0.07584 | $0.09909 |
+| s* | 1 / 2 | P10 | $0.08505 | Not supported | $0.04252 | Not supported |
+| sp* | 1 / 2 | P20 | $0.15168 | Not supported | $0.07584 | Not supported |
 | m | 2 / 8 | P10 | $0.12055 | $0.21255 | $0.06027 | $0.10627 |
 | mp | 2 / 8 | P20 | $0.18718 | $0.27918 | $0.09359 | $0.13959 |
 | l | 4 / 16 | P10 | $0.21655 | $0.40055 | $0.10827 | $0.20027 |
@@ -203,9 +203,9 @@ USD East US 2 pay-as-you-go retail rates checked 2026-10-05. Each rate includes 
 | xl | 8 / 32 | P10 | $0.40855 | $0.77655 | $0.20427 | $0.38827 |
 | xlp | 8 / 32 | P20 | $0.47518 | $0.84318 | $0.23759 | $0.42159 |
 
-*Small is a conditional estimate for `Standard_F1als_v7`, not a qualified capability. It requires a Gen2/NVMe-compatible image and regional/subscription availability. Windows Server can meet a 2-GiB OS minimum, but Visual Studio Build Tools requires at least 4 GiB; a lightweight job may qualify without Build Tools. RAM, free disk, and job-specific requirements must be measured. A standard Windows marketplace OS image is about 127 GiB, so it can fit P10's 128 GiB; the actual custom image and free workspace must be checked. Do not select a large-disk image and quote P10 pricing.
+*Linux small remains a conditional estimate for `Standard_F1als_v7`, pending a Gen2/NVMe-compatible image and regional/subscription qualification. Windows small is outside the supported catalog; its 2-GiB memory allocation is below Visual Studio Build Tools' 4-GiB minimum. RAM, free disk, and job-specific requirements must be measured. A standard Windows marketplace OS image is about 127 GiB, so it can fit P10's 128 GiB; the actual custom image and free workspace must be checked. Do not select a large-disk image and quote P10 pricing.
 
-Compute-only Linux/Windows rates are F1als_v7 $0.0605/$0.107, D2s_v5 $0.096/$0.188, D4s_v5 $0.192/$0.376, D8s_v5 $0.384/$0.752 per hour. P10 is $17.92/month; P20 $66.56/month. The 30-minute column is 30 minutes of resource lifetime, **not** a 30-minute job plus free startup/cleanup. Add boot, provisioning, and cleanup time; disks bill until deletion. Public IPv4 adds $0.005/hour ($0.0025/30 minutes).
+Compute-only Linux F1als_v7 is $0.0605/hour. Compute-only Linux/Windows rates are D2s_v5 $0.096/$0.188, D4s_v5 $0.192/$0.376, D8s_v5 $0.384/$0.752 per hour. P10 is $17.92/month; P20 $66.56/month. The 30-minute column is 30 minutes of resource lifetime, **not** a 30-minute job plus free startup/cleanup. Add boot, provisioning, and cleanup time; disks bill until deletion. Public IPv4 adds $0.005/hour ($0.0025/30 minutes).
 
 The one shared controller, ACR, retained images, Key Vault operations, logs, egress, image builds, and taxes are separate. Windows adds no controller per profile, but its retained image is additional storage. ACR Basic already costs about $0.1666/day; the controller's 0.25-vCPU/0.5-GiB allocation is about $0.0081/hour idle or $0.027/hour active before shared grants. These are not zero even with no runner VMs.
 

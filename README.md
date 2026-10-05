@@ -42,7 +42,7 @@ Capture the GitHub App client ID (or numeric App ID), installation ID, and a pri
 
 ## Configure runner pools
 
-Copy [runner-pools.example.json](runner-pools.example.json) to a deployment-private location and customize it. It contains eight Linux CPU/memory/disk profiles and eight disabled Windows counterparts:
+Copy [runner-pools.example.json](runner-pools.example.json) to a deployment-private location and customize it. It contains eight Linux CPU/memory/disk profiles and six disabled Windows counterparts:
 
 - 2 CPUs / 8 GiB (`Standard_D2s_v5`), 4 CPUs / 16 GiB (`Standard_D4s_v5`), and 8 CPUs / 32 GiB (`Standard_D8s_v5`), each with P10 and P20 disks, are enabled.
 - 1 CPU / 2 GiB (`Standard_F1als_v7`), with P10 and P20 disks, is disabled pending Gen2/NVMe-compatible Compute Gallery image and subscription qualification. Do not enable these profiles against the existing managed image.
@@ -53,7 +53,7 @@ The pool `name` is its stable GitHub logical scale-set identity, independent of 
 
 All enabled pools run in one shared controller with the original Azure resource name; pool order does not create or rename controllers. An omitted or empty Linux per-pool `imageId` inherits `RUNNER_IMAGE_ID`. Windows profiles require `osType: "Windows"`, their own qualified `imageId`; they never inherit the Linux image. Image compatibility must be qualified for every enabled SKU.
 
-Windows jobs use `avp-windows-s`, `avp-windows-sp`, `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, or `avp-windows-xlp` with the identical hardware/disk mapping. All eight are disabled until their image, credentials, access, cost, and runtime lifecycle are qualified. The separate [Windows image](image/windows-runner.pkr.hcl) includes a lightweight .NET/Node/Git/PowerShell toolchain; Visual Studio workloads and interactive UI tests are not implied. See [Windows activation](docs/operations.md#windows-profile-qualification) and [Linux/Windows costs](docs/configuration.md#linux-versus-windows-costs).
+Windows jobs use `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, or `avp-windows-xlp` with the identical hardware/disk mapping. All six are disabled until their image, credentials, access, cost, and runtime lifecycle are qualified. Windows S/SP are excluded: their 2 GiB of RAM falls below the 4-GiB Visual Studio Build Tools minimum. Linux retains its planned small profiles. The separate [Windows image](image/windows-runner.pkr.hcl) includes a lightweight .NET/Node/Git/PowerShell toolchain; Visual Studio workloads and interactive UI tests are not implied. See [Windows activation](docs/operations.md#windows-profile-qualification) and [Linux/Windows costs](docs/configuration.md#linux-versus-windows-costs).
 
 An optional per-pool `osDiskTier` selects capacity-backed Premium SSD performance. The example explicitly selects P10 or P20. Review the [mapping, VM limits, and cost](docs/configuration.md#optional-os-disk-performance) before activating a profile.
 
