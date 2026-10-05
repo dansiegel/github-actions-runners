@@ -15,7 +15,7 @@ This is intentionally not Azure Container Apps Jobs: those jobs do not support p
 | Ephemeral Azure VMs | 0 | Execute exactly one job each; independently sized with optional per-pool caps |
 | Managed runner image | Stored | Default .NET 10 / Node 24 / Docker build toolchain, with optional per-pool image overrides |
 | ACR | Basic | Stores the controller image |
-| Key Vault | Empty of runner data | Stores GitHub App controller credentials; Windows optionally uses a separate administrator-credential vault |
+| Key Vault | Empty of runner data | Stores only GitHub App controller credentials |
 | VNet + runner subnet + NSG | No metered gateway | Denies Internet ingress to runner public IPs |
 | Log Analytics | Usage based | Stores all controller logs |
 
@@ -30,7 +30,6 @@ Each pool defines:
 - `labels`: complete profile labels registered on the GitHub logical scale set; each job selects one;
 - `imageId`: optional image resource ID override; Linux inherits `RUNNER_IMAGE_ID` when omitted/empty; Windows requires an explicit qualified image;
 - `osType`: `Linux` (default) or `Windows`;
-- `windowsAdminSecret`: Windows-only, pinned Key Vault secret reference resolved by Azure;
 - `osDiskTier`: optional capacity-backed Premium SSD tier;
 - `enabled`: optional boolean, defaulting to true; false prevents starting that profile's listener and VMs.
 
@@ -83,7 +82,7 @@ Capacity must be budgeted across all enabled pools. The example follows demand w
 
 ## Windows provisioning
 
-Linux continues to use its existing direct VM API/cloud-init path. Windows uses an incremental ARM deployment for the VM so Azure can resolve the administrator password from a Key Vault secure-parameter reference; the controller handles only identifiers. JIT custom data is also a secure template parameter. The VM has no managed identity and uses the same resource tags, independent listener/state, reservations, demand-driven limits, reconciliation, and cleanup as Linux.
+Linux continues to use its existing direct VM API/cloud-init path. Windows uses an incremental ARM deployment for the VM so Azure generates a throwaway administrator password from a secure default expression; the controller never handles the value. No Key Vault secret or new vault grant is needed for Windows. An uncertain Windows deployment PUT is never automatically resubmitted; the existing deployment is polled, preserving one default evaluation per attempted deployment. JIT custom data is also a secure template parameter. The VM has no managed identity and uses the same resource tags, independent listener/state, reservations, demand-driven limits, reconciliation, and cleanup as Linux.
 
 Azure Windows custom data is not executable. A trusted startup task baked into the qualified image reads the data-only JSON envelope, checks the runner version/checksum against the image manifest, consumes and removes the local JIT payload, runs exactly one job as SYSTEM, and shuts down. A durable exclusive-create marker prevents replay after reboot; scheduled-task instance policy prevents parallel startup. The bootstrap does not download a replacement runner at runtime. A mismatch requires a newly qualified image.
 

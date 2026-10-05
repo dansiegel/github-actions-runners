@@ -32,9 +32,11 @@ function Invoke-RunnerBootstrap {
         [scriptblock] $RunRunner = { param($root) Push-Location $root; try { & .\run.cmd | Out-Host; return $LASTEXITCODE } finally { Pop-Location } }
     )
     # FileMode.CreateNew is the durable one-shot guard, including after reboot.
+    $ownsRun = $false
     try {
         $marker = [IO.File]::Open((Join-Path $StateRoot 'started'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $marker.Dispose()
+        $ownsRun = $true
         $jit = Read-RunnerBootstrapData -Path $CustomDataPath -ManifestPath (Join-Path $StateRoot 'manifest.json')
         if (-not (Test-Path -LiteralPath (Join-Path $RunnerRoot 'run.cmd') -PathType Leaf)) { throw 'Baked runner is missing' }
         if (Test-Path -LiteralPath (Join-Path $RunnerRoot '.runner')) { throw 'Image contains an already configured runner' }
@@ -47,7 +49,7 @@ function Invoke-RunnerBootstrap {
         return [int] $code
     } finally {
         Remove-Item Env:ACTIONS_RUNNER_INPUT_JITCONFIG -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $CustomDataPath -Force -ErrorAction SilentlyContinue
+        if ($ownsRun) { Remove-Item -LiteralPath $CustomDataPath -Force -ErrorAction SilentlyContinue }
     }
 }
 

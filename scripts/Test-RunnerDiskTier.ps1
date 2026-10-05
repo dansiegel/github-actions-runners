@@ -133,9 +133,8 @@ try {
         }
     }
     Test-PoolDryRun -Name 'Windows requires a qualified image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows' }) -Valid $false
-    Test-PoolDryRun -Name 'Windows requires secure secret reference' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows' }) -Valid $false
-    $secret = @{ keyVaultId = '/subscriptions/test/resourceGroups/test/providers/Microsoft.KeyVault/vaults/windows'; secretName = 'runner-admin'; secretVersion = ('a' * 32) }
-    Test-PoolDryRun -Name 'qualified Windows reference' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; windowsAdminSecret = $secret }) -Expected @('pool imageId override')
+    Test-PoolDryRun -Name 'qualified Windows image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows' }) -Expected @('pool imageId override')
+    Test-PoolDryRun -Name 'plaintext password rejected' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; adminPassword = 'not-accepted' }) -Valid $false
     foreach ($os in @($null, 'windows', '', 1, $true)) {
         Test-PoolDryRun -Name 'invalid OS type' -Pools @(@{ name = 'invalid'; vmSize = 'Standard_D4s_v5'; osType = $os }) -Valid $false
     }

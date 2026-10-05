@@ -68,7 +68,7 @@ function Get-NormalizedRunnerPools {
             throw 'Each runner pool must be a JSON object'
         }
         foreach ($property in $pool.PSObject.Properties.Name) {
-            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId', 'osType', 'windowsAdminSecret')) {
+            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId', 'osType')) {
                 throw "Unknown runner pool configuration field: $property"
             }
         }
@@ -110,19 +110,6 @@ function Get-NormalizedRunnerPools {
             throw "Enabled Windows pool '$name' requires an explicit qualified imageId"
         }
 
-        $hasWindowsSecret = $null -ne $pool.PSObject.Properties['windowsAdminSecret']
-        if ($hasWindowsSecret) {
-            $secret = $pool.windowsAdminSecret
-            if ($pool.osType -cne 'Windows' -or $secret -isnot [pscustomobject] -or (@($secret.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'keyVaultId,secretName,secretVersion') {
-                throw 'windowsAdminSecret requires exactly keyVaultId, secretName, secretVersion on a Windows profile'
-            }
-            if ($secret.keyVaultId -isnot [string] -or $secret.secretName -isnot [string] -or $secret.secretVersion -isnot [string] -or $secret.keyVaultId -cnotmatch '^/subscriptions/[A-Za-z0-9-]+/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft.KeyVault/vaults/[A-Za-z0-9-]+$' -or $secret.secretName -cnotmatch '^[A-Za-z0-9-]{1,127}$' -or $secret.secretVersion -cnotmatch '^[a-fA-F0-9]{32}$') {
-                throw 'Invalid Windows Key Vault secret reference'
-            }
-        } elseif ($pool.osType -ceq 'Windows' -and $pool.enabled -ne $false) {
-            throw 'Enabled Windows profiles require windowsAdminSecret'
-        }
-
         $priority = if ($null -eq $pool.priority -or [string]::IsNullOrWhiteSpace([string] $pool.priority)) { 'Regular' } else { ([string] $pool.priority).Trim() }
         if ($priority -notin @('Regular', 'Spot')) {
             throw "Runner pool '$name' priority must be Regular or Spot"
@@ -149,7 +136,6 @@ function Get-NormalizedRunnerPools {
         if ($hasEnabled) { $normalizedPool.enabled = $pool.enabled }
         if ($hasImageId) { $normalizedPool.imageId = $pool.imageId.Trim() }
         if ($hasOSType) { $normalizedPool.osType = $pool.osType }
-        if ($hasWindowsSecret) { $normalizedPool.windowsAdminSecret = $pool.windowsAdminSecret }
         $normalized += $normalizedPool
     }
     if (@($normalized | Where-Object { $_.enabled -ne $false }).Count -eq 0) {

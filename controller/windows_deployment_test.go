@@ -13,7 +13,7 @@ import (
     "testing"
 )
 
-func TestWindowsCreateUsesKeyVaultSecureReferenceAndDeletesMetadata(t *testing.T) {
+func TestWindowsCreateGeneratesCredentialInsideAzureAndDeletesMetadata(t *testing.T) {
     var mu sync.Mutex
     var deployment map[string]any
     deleted := false
@@ -33,20 +33,19 @@ func TestWindowsCreateUsesKeyVaultSecureReferenceAndDeletesMetadata(t *testing.T
         _,_ = io.WriteString(w,`{}`)
     }))
     defer server.Close()
-    c:=validConfig(); c.OSType="Windows";c.ImageID="/images/windows";c.WindowsAdminSecret=testWindowsSecret();c.ARMEndpoint=server.URL
+    c:=validConfig(); c.OSType="Windows";c.ImageID="/images/windows";c.ARMEndpoint=server.URL
     manager:=&AzureVMManager{config:c,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
     if _,err:=manager.Create(context.Background(),"avp-windows-lp-123","jit-token");err!=nil{t.Fatal(err)}
     mu.Lock();defer mu.Unlock()
     if !deleted {t.Fatal("completed deployment metadata retained")}
     properties:=deployment["properties"].(map[string]any)
     parameters:=properties["parameters"].(map[string]any)
-    password:=parameters["adminPassword"].(map[string]any)
-    if password["value"] != nil {t.Fatal("password value crossed controller boundary")}
-    reference:=password["reference"].(map[string]any)
-    if reference["secretVersion"]!=c.WindowsAdminSecret.SecretVersion {t.Fatal("secret version not pinned")}
+    if parameters["adminPassword"] != nil {t.Fatal("controller supplied an administrator credential")}
     template:=properties["template"].(map[string]any)
     definitions:=template["parameters"].(map[string]any)
     for _,name:=range []string{"adminPassword","customData"} {if definitions[name].(map[string]any)["type"]!="securestring" {t.Fatal("sensitive parameter not secure")}}
+    if definitions["adminPassword"].(map[string]any)["defaultValue"] != "[concat('Aa1!', newGuid())]" {t.Fatal("credential must be generated inside Azure with password complexity")}
+    if template["outputs"] != nil {t.Fatal("deployment must not expose credential outputs")}
     resource:=template["resources"].([]any)[0].(map[string]any)
     profile:=resource["properties"].(map[string]any)["osProfile"].(map[string]any)
     if profile["adminPassword"]!="[parameters('adminPassword')]" || profile["customData"]!="[parameters('customData')]" {t.Fatal("credential embedded in template history")}
@@ -84,4 +83,21 @@ func TestUnqualifiedWindowsCreatesNoResources(t *testing.T) {
     manager:=&AzureVMManager{config:c,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
     if _,err:=manager.Create(context.Background(),"windows-test","jit");err==nil{t.Fatal("unqualified Windows accepted")}
     if calls!=0{t.Fatal("unqualified profile created billable network resources")}
+}
+
+func TestWindowsUncertainPutPollsWithoutRegeneratingCredential(t *testing.T) {
+    puts := 0
+    server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+        w.Header().Set("Content-Type","application/json")
+        if strings.Contains(r.URL.Path,"/deployments/") {
+            if r.Method==http.MethodPut {puts++;w.WriteHeader(http.StatusInternalServerError);_,_=io.WriteString(w,`{"error":{"code":"InternalServerError"}}`);return}
+            if r.Method==http.MethodGet {_,_=io.WriteString(w,`{"properties":{"provisioningState":"Succeeded"}}`);return}
+        }
+        _,_=io.WriteString(w,`{}`)
+    }))
+    defer server.Close()
+    c:=validConfig();c.OSType="Windows";c.ImageID="/images/windows";c.ARMEndpoint=server.URL
+    manager:=&AzureVMManager{config:c,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
+    if _,err:=manager.Create(context.Background(),"windows-unique","jit");err!=nil{t.Fatal(err)}
+    if puts!=1{t.Fatalf("deployment PUT occurred %d times; credential default can be reevaluated",puts)}
 }

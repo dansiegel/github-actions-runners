@@ -37,7 +37,6 @@ type Config struct {
 	VMSize         string
 	ImageID        string
 	OSType         string
-	WindowsAdminSecret *WindowsAdminSecret
 	VMAdminUser    string
 	VMSSHPublicKey string
 	VMPriority     string
@@ -70,7 +69,6 @@ type RunnerPool struct {
 	Enabled    *bool    `json:"enabled,omitempty"`
 	ImageID    string   `json:"imageId,omitempty"`
 	OSType     string   `json:"osType,omitempty"`
-	WindowsAdminSecret *WindowsAdminSecret `json:"windowsAdminSecret,omitempty"`
 }
 
 func (p *RunnerPool) UnmarshalJSON(data []byte) error {
@@ -85,11 +83,11 @@ func (p *RunnerPool) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true, "osType":true, "windowsAdminSecret":true}
+	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true, "osType":true}
 	for key := range fields {
 		if !allowed[key] { return fmt.Errorf("unknown runner pool field %q", key) }
 	}
-	for _, key := range []string{"maxRunners", "enabled", "imageId", "osType", "windowsAdminSecret"} {
+	for _, key := range []string{"maxRunners", "enabled", "imageId", "osType"} {
 		if value, present := fields[key]; present && strings.TrimSpace(string(value)) == "null" {
 			return fmt.Errorf("%s cannot be null", key)
 		}
@@ -183,10 +181,6 @@ func (c *Config) validate(requireImage bool) error {
 	if c.OSType == "Windows" && requireImage && strings.TrimSpace(c.ImageID) == "" {
 		return fmt.Errorf("Windows profiles require an explicit qualified imageId")
 	}
-	if c.OSType == "Windows" {
-		if c.WindowsAdminSecret == nil && requireImage { return fmt.Errorf("enabled Windows profiles require a windowsAdminSecret Key Vault reference") }
-		if c.WindowsAdminSecret != nil { if err := c.WindowsAdminSecret.Validate(); err != nil { return err } }
-	} else if c.WindowsAdminSecret != nil { return fmt.Errorf("windowsAdminSecret is only valid for Windows") }
 	if c.OSType == "Linux" && strings.TrimSpace(c.VMSSHPublicKey) == "" {
 		return fmt.Errorf("RUNNER_ADMIN_SSH_PUBLIC_KEY is required for Linux")
 	}
@@ -284,7 +278,6 @@ func (c Config) PoolConfigs() ([]Config, error) {
 		}
 		p.OSDiskTier = strings.TrimSpace(pool.OSDiskTier)
 		p.OSType = pool.OSType
-		p.WindowsAdminSecret = pool.WindowsAdminSecret
 		if p.OSType == "Windows" {
 			// Never inherit the shared Linux image or Linux runner archive checksum.
 			p.ImageID = ""

@@ -355,7 +355,13 @@ func (m *AzureVMManager) resourceURL(resourceID, apiVersion string) string {
 }
 
 func (m *AzureVMManager) request(ctx context.Context, method, requestURL string, body []byte, accepted ...int) ([]byte, error) {
-	for attempt := 0; attempt < 5; attempt++ {
+    return m.requestWithRetry(ctx, method, requestURL, body, true, accepted...)
+}
+
+func (m *AzureVMManager) requestWithRetry(ctx context.Context, method, requestURL string, body []byte, retry bool, accepted ...int) ([]byte, error) {
+	maxAttempts := 5
+	if !retry { maxAttempts = 1 }
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		accessToken, err := m.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}})
 		if err != nil {
 			return nil, fmt.Errorf("getting Azure access token: %w", err)
@@ -376,7 +382,7 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 
 		resp, err := m.httpClient.Do(req)
 		if err != nil {
-			if attempt == 4 {
+			if attempt == maxAttempts-1 {
 				return nil, err
 			}
 			if err := sleepContext(ctx, time.Duration(attempt+1)*time.Second); err != nil {
@@ -405,7 +411,7 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 			}
 			return responseBody, nil
 		}
-		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 4 {
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < maxAttempts-1 {
 			delay := retryDelay(resp.Header, attempt)
 			if err := sleepContext(ctx, delay); err != nil {
 				return nil, err

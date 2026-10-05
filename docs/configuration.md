@@ -24,7 +24,7 @@ There are no default subscription or organization values.
 
 ## Runner pool JSON
 
-`runner-pools.example.json` documents the supported shape. Each entry accepts only `name`, `vmSize`, `maxRunners`, `priority`, `labels`, `osDiskTier`, `enabled`, `imageId`, `osType`, and `windowsAdminSecret`; unknown keys are rejected:
+`runner-pools.example.json` documents the supported shape. Each entry accepts only `name`, `vmSize`, `maxRunners`, `priority`, `labels`, `osDiskTier`, `enabled`, `imageId`, and `osType`; unknown keys are rejected:
 
 ```json
 [
@@ -168,7 +168,7 @@ Set a pool's `priority` to `Spot` only for retry-safe workflows. Spot VMs use `e
 
 ## Windows profile schema
 
-`osType` is optional and defaults to `Linux`; when present it must be exactly `Linux` or `Windows`. Windows profiles never inherit the shared Linux image. An enabled Windows profile requires a nonempty, qualified `imageId` and `windowsAdminSecret`:
+`osType` is optional and defaults to `Linux`; when present it must be exactly `Linux` or `Windows`. Windows profiles never inherit the shared Linux image. An enabled Windows profile requires a nonempty, qualified `imageId`:
 
 ```json
 {
@@ -178,16 +178,13 @@ Set a pool's `priority` to `Spot` only for retry-safe workflows. Spot VMs use `e
   "vmSize": "Standard_D4s_v5",
   "osDiskTier": "P20",
   "imageId": "/subscriptions/example/resourceGroups/runners/providers/Microsoft.Compute/images/qualified-windows",
-  "windowsAdminSecret": {
-    "keyVaultId": "/subscriptions/example/resourceGroups/runners/providers/Microsoft.KeyVault/vaults/windows-credentials",
-    "secretName": "runner-admin",
-    "secretVersion": "00000000000000000000000000000000"
-  },
   "enabled": false
 }
 ```
 
-These are resource references, not secret values. Use the actual, pinned secret version in private deployment configuration after operator setup. The controller never generates, reads, or sends a Windows administrator password. Azure resolves the Key Vault reference into a `securestring` template parameter; no password belongs in pool JSON, image, logs, command line, or repository. This reference is Windows-only and accepts exactly the three nonempty fields shown; the version must be 32 hexadecimal characters. Disabled Windows placeholders may omit image and secret references. Enabling a placeholder without both fails validation before network resources are created.
+Azure generates a unique throwaway administrator password inside each VM deployment using a `securestring` default expression with `newGuid()` and a complexity prefix. The controller sends only that expression: it never generates, reads, supplies, stores, or logs the resulting password. There is no password input, secret reference, shared administrator password, or credential output. The credential lives only as the VM's local account credential and is discarded with that ephemeral VM; recovery uses an approved Azure operator route rather than a stored password.
+
+The Windows deployment PUT is attempted once. An uncertain response is resolved by reading/polling the same deterministic deployment identity rather than resubmitting and reevaluating the default. A later fleet retry uses a new runner/VM identity after cleanup. Disabled Windows placeholders may omit `imageId`; enabling one without it fails before network resources are created. [Microsoft documents secure generated defaults](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/linter-rule-secure-parameter-default); this still requires explicit approval for the Windows provisioning/access mechanism before activation.
 
 The eight Windows labels replace only the `linux` part of the Linux names: `avp-windows-s`, `avp-windows-sp`, `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, `avp-windows-xlp`. There is no legacy Windows alias. All Windows entries are disabled in the public example. Linux entries and legacy ownership remain unchanged. `WINDOWS_RUNNER_SHA256` selects the Windows archive checksum for the common `RUNNER_VERSION`; update the baked Windows image and that checksum together.
 
