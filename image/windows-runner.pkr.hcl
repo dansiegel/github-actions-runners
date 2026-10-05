@@ -44,29 +44,34 @@ variable "runner_sha256" {
 }
 
 # This separate, operator-approved image build is never invoked by deploy-azure.
-# Packer creates temporary credentials and a TLS WinRM listener restricted to
-# the supplied /32. Its ephemeral self-signed certificate requires explicit
-# operator approval before execution. Runtime runners expose neither WinRM nor RDP.
+# The guest creates its own temporary TLS key; no build Key Vault is created.
+# Packer's temporary credential and the supplied /32 are operator-approved.
+# Runtime runners expose neither WinRM nor RDP.
 source "azure-arm" "windows_runner" {
   use_azure_cli_auth                 = true
-  subscription_id                   = var.subscription_id
-  location                          = var.location
-  managed_image_resource_group_name = var.resource_group_name
-  managed_image_name                = var.managed_image_name
+  subscription_id                    = var.subscription_id
+  location                           = var.location
+  managed_image_resource_group_name  = var.resource_group_name
+  managed_image_name                 = var.managed_image_name
   managed_image_storage_account_type = "Premium_LRS"
-  os_type                           = "Windows"
-  image_publisher                   = "MicrosoftWindowsServer"
-  image_offer                       = "WindowsServer"
-  image_sku                         = "2025-datacenter-g2"
-  image_version                     = var.base_image_version
-  vm_size                           = "Standard_D4s_v5"
+  os_type                            = "Windows"
+  image_publisher                    = "MicrosoftWindowsServer"
+  image_offer                        = "WindowsServer"
+  image_sku                          = "2025-datacenter-g2"
+  image_version                      = var.base_image_version
+  vm_size                            = "Standard_D4s_v5"
   os_disk_size_gb                    = 128
-  communicator                      = "winrm"
-  winrm_username                    = "packer"
-  winrm_use_ssl                     = true
-  winrm_insecure                    = var.allow_unverified_winrm_certificate
-  winrm_timeout                     = "15m"
-  allowed_inbound_ip_addresses       = [var.build_source_cidr]
+  communicator                       = "winrm"
+  skip_create_build_key_vault        = true
+  # Only public bootstrap code and the approved source CIDR enter this command.
+  # No password, private key, user data, or external script download is involved.
+  custom_script                = "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${base64encode(file("${path.root}/scripts/Initialize-WindowsRunnerImage.ps1"))}')))) -BuildSourceCidr '${var.build_source_cidr}'\""
+  winrm_username               = "packer"
+  winrm_use_ssl                = true
+  winrm_use_ntlm               = true
+  winrm_insecure               = var.allow_unverified_winrm_certificate
+  winrm_timeout                = "15m"
+  allowed_inbound_ip_addresses = [var.build_source_cidr]
 
   azure_tags = {
     project       = "github-actions-runners"

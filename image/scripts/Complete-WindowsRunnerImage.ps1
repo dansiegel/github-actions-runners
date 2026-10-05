@@ -49,5 +49,10 @@ foreach ($thumbprint in $thumbprints) {
     $certificate = "Cert:\LocalMachine\My\$thumbprint"
     if (Test-Path $certificate) { Remove-Item $certificate -DeleteKey -Force }
 }
+# Sysprep may reset the listener; still remove the guest-created build key.
+Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' } | Remove-Item -DeleteKey -Force
+if (@(Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' }).Count) { throw 'Build TLS key remains in the image' }
 Get-ChildItem WSMan:\localhost\Listener | Remove-Item -Recurse -Force
+Get-NetFirewallRule -Name 'WINRM-Packer-Build' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 0 -Force | Out-Null
 Remove-Item -LiteralPath $PSCommandPath -Force
