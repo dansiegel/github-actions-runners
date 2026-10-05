@@ -426,7 +426,7 @@ output controllerIdentityClientId string = controllerIdentity.properties.clientI
 var controllerNames = deployController ? [runnerController!.name] : []
 var runnerScaleSetNames = [for runnerPool in runnerPools: runnerPool.name]
 
-output controllerName string = length(controllerNames) > 0 ? controllerNames[0] : ''
+output controllerName string = deployController ? runnerController!.name : ''
 output controllerNames array = controllerNames
 output controllerDeployed bool = deployController
 output runnerScaleSetName string = runnerScaleSetNames[0]
