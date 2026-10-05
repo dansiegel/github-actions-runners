@@ -122,9 +122,17 @@ function Get-NormalizedRunnerPools {
 
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
+        $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+        $profileLabelCount = 0
         foreach ($label in $labels) {
-            if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            if ($label -in @('Linux', 'Windows', 'macOS')) {
+                if ($label -ine $osLabel) { throw "Runner OS label '$label' conflicts with osType $osLabel" }
+            } else {
+                $profileLabelCount++
+                if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            }
         }
+        if ($profileLabelCount -eq 0) { throw 'Runner labels require a profile label in addition to the operating system' }
         $normalizedPool = [ordered]@{
             name       = $name
             vmSize     = $vmSize
@@ -159,7 +167,8 @@ foreach ($pool in $runnerPools) {
     $capacity = if ($pool.enabled -eq $false) { 'disabled' } elseif (-not $pool.maxRunners) { '0..demand (uncapped)' } else { "0..$($pool.maxRunners)" }
     Write-Host ("  {0}: {1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $capacity, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
     $imageSource = if ($pool.imageId) { 'pool imageId override' } elseif ($pool.osType -ceq 'Windows') { 'unqualified Windows image (disabled)' } else { 'shared RUNNER_IMAGE_ID' }
-    Write-Host ("  {0} labels: {1}; image: {2}" -f $pool.name, ($pool.labels -join ', '), $imageSource)
+    $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+    Write-Host ("  {0} labels: {1}; image: {2}; OS tag: {3}" -f $pool.name, ($pool.labels -join ', '), $imageSource, $osLabel)
 }
 Write-Host 'Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 

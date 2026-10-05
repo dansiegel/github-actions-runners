@@ -30,6 +30,18 @@ var runnerSubnetAddressPrefix = '10.42.1.0/24'
 var runnerVersion = '2.337.0'
 var runnerSha256 = '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613'
 var windowsRunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc'
+// Windows uses an ARM deployment so Azure generates its local credential.
+// Disabled catalog placeholders must not expand the controller's permissions.
+var hasEnabledWindowsPool = !empty(filter(runnerPools, pool => (pool.?osType ?? 'Linux') == 'Windows' && (pool.?enabled ?? true)))
+var windowsDeploymentActions = hasEnabledWindowsPool ? [
+  'Microsoft.Resources/deployments/read'
+  'Microsoft.Resources/deployments/write'
+  'Microsoft.Resources/deployments/delete'
+  'Microsoft.Resources/deployments/cancel/action'
+  'Microsoft.Resources/deployments/operations/read'
+  'Microsoft.Resources/deployments/operationstatuses/read'
+] : []
+
 
 resource runnerNetworkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: 'gha-runners-${resourceToken}-nsg'
@@ -162,7 +174,7 @@ resource runnerLifecycleRole 'Microsoft.Authorization/roleDefinitions@2022-04-01
     type: 'CustomRole'
     permissions: [
       {
-        actions: [
+        actions: concat([
           'Microsoft.Compute/virtualMachines/read'
           'Microsoft.Compute/virtualMachines/write'
           'Microsoft.Compute/virtualMachines/delete'
@@ -184,7 +196,7 @@ resource runnerLifecycleRole 'Microsoft.Authorization/roleDefinitions@2022-04-01
           'Microsoft.Network/virtualNetworks/subnets/read'
           'Microsoft.Network/virtualNetworks/subnets/join/action'
           'Microsoft.Resources/subscriptions/resourceGroups/read'
-        ]
+        ], windowsDeploymentActions)
         notActions: []
         dataActions: []
         notDataActions: []

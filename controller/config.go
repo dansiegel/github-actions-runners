@@ -197,11 +197,15 @@ func (c *Config) validate(requireImage bool) error {
 	if len(c.Labels) == 0 {
 		c.Labels = []string{c.ScaleSetName}
 	}
+	profileLabels := 0
 	for _, label := range c.Labels {
-		if strings.TrimSpace(label) == "" {
-			return fmt.Errorf("RUNNER_LABELS cannot contain an empty label")
-		}
+		label = strings.TrimSpace(label)
+		if label == "" { return fmt.Errorf("RUNNER_LABELS cannot contain an empty label") }
+		if isOperatingSystemLabel(label) {
+			if !strings.EqualFold(label, c.OperatingSystemLabel()) { return fmt.Errorf("runner OS label %q conflicts with osType %s", label, c.OperatingSystemLabel()) }
+		} else { profileLabels++ }
 	}
+	if profileLabels == 0 { return fmt.Errorf("RUNNER_LABELS requires a profile label in addition to the operating system") }
 	if err := c.GitHubApp.Validate(); err != nil {
 		return fmt.Errorf("GitHub App configuration is invalid: %w", err)
 	}
@@ -296,6 +300,7 @@ func (c Config) PoolConfigs() ([]Config, error) {
 		}
 		for _, label := range p.Labels {
 			key := strings.ToLower(strings.TrimSpace(label))
+			if isOperatingSystemLabel(key) { continue }
 			if owner, ok := labels[key]; ok {
 				return nil, fmt.Errorf("runner label %q is repeated in pools %q and %q", label, owner, name)
 			}
@@ -320,12 +325,24 @@ func (c Config) ListenerMaxRunners() int {
 	return c.MaxRunners
 }
 
+func (c Config) OperatingSystemLabel() string {
+	if c.OSType == "Windows" { return "Windows" }
+	return "Linux"
+}
+
+func isOperatingSystemLabel(label string) bool {
+	return strings.EqualFold(label, "Linux") || strings.EqualFold(label, "Windows") || strings.EqualFold(label, "macOS")
+}
+
 func (c Config) ScaleSetLabels() []scaleset.Label {
-	labels := make([]scaleset.Label, 0, len(c.Labels))
+	labels := make([]scaleset.Label, 0, len(c.Labels)+1)
 	for _, label := range c.Labels {
-		labels = append(labels, scaleset.Label{Name: strings.TrimSpace(label)})
+		label = strings.TrimSpace(label)
+		if !isOperatingSystemLabel(label) { labels = append(labels, scaleset.Label{Name: label}) }
 	}
-	return labels
+	// Advertise OS at the scale-set level so queued jobs can match while the
+	// pool has zero VMs. Runtime runner default labels arrive too late for that.
+	return append(labels, scaleset.Label{Name: c.OperatingSystemLabel()})
 }
 
 func env(name, fallback string) string {

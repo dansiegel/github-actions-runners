@@ -27,7 +27,7 @@ Each pool defines:
 - `vmSize`: Azure SKU, such as `Standard_D2s_v5` or `Standard_D4s_v5`;
 - `maxRunners`: optional concurrent VM cap; zero or omission follows demand without a configured cap, while a positive integer up to 2,147,483,647 sets a cap;
 - `priority`: `Regular` or `Spot`;
-- `labels`: complete profile labels registered on the GitHub logical scale set; each job selects one;
+- `labels`: complete profile labels registered on the GitHub logical scale set; each job selects one plus the automatically advertised OS tag;
 - `imageId`: optional image resource ID override; Linux inherits `RUNNER_IMAGE_ID` when omitted/empty; Windows requires an explicit qualified image;
 - `osType`: `Linux` (default) or `Windows`;
 - `osDiskTier`: optional capacity-backed Premium SSD tier;
@@ -87,3 +87,5 @@ Linux continues to use its existing direct VM API/cloud-init path. Windows uses 
 Azure Windows custom data is not executable. A trusted startup task baked into the qualified image reads the data-only JSON envelope, checks the runner version/checksum against the image manifest, consumes and removes the local JIT payload, runs exactly one job as SYSTEM, and shuts down. A durable exclusive-create marker prevents replay after reboot; scheduled-task instance policy prevents parallel startup. The bootstrap does not download a replacement runner at runtime. A mismatch requires a newly qualified image.
 
 Completed deployment metadata is deleted without deleting the VM. Cleanup cancels any in-flight deployment and waits for a terminal state **before** deleting VM/NIC/IP resources, preventing a late template create from resurrecting an orphan. NIC/PIP tags exist before deployment, so startup orphan adoption also covers an interrupted Windows deployment. Nested Azure quota/allocation error codes feed the existing backoff policy. The Linux API path does not acquire additional privileges through this change.
+
+The scale-set registration always includes its `Linux` or `Windows` tag. Matching OS tags are shared across profiles while each complete profile label remains unique, allowing combined workflow selectors without losing hardware isolation. The Windows deployment-management permission list is computed from enabled Windows pools in Bicep; disabled placeholders add no access, and removing the last enabled Windows pool removes those permissions on reprovisioning.

@@ -112,7 +112,13 @@ fi
 # Check routing across the complete array, including disabled profiles, so an
 # enablement change cannot introduce an ambiguous label later.
 RUNNER_POOLS_JSON="$(jq -ce '
-  if ([.[] | .labels[] | ascii_downcase] | length) != ([.[] | .labels[] | ascii_downcase] | unique | length) then error("runner labels must be unique across all pools") else . end
+  def is_os: . == "linux" or . == "windows" or . == "macos";
+  map(. as $pool
+    | (.osType // "Linux" | ascii_downcase) as $os
+    | if any(.labels[]; ascii_downcase as $label | ($label | is_os) and $label != $os) then error("OS label conflicts with osType for " + .name) else . end
+    | if all(.labels[]; ascii_downcase | is_os) then error("a profile label is required in addition to the operating system") else . end
+  )
+  | if ([.[] | .labels[] | ascii_downcase | select(is_os | not)] | length) != ([.[] | .labels[] | ascii_downcase | select(is_os | not)] | unique | length) then error("profile labels must be unique across all pools") else . end
   | if any(.[]; .enabled != false) then . else error("at least one runner pool must be enabled") end
 ' <<<"$RUNNER_POOLS_JSON")"
 
@@ -133,7 +139,7 @@ echo "Location:            $LOCATION"
 echo "Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)"
 echo "Runner pools:"
 jq -r '.[] | "  \(.name): \(if .enabled == false then "disabled" elif (.maxRunners // 0) == 0 then "0..demand (uncapped)" else "0..\(.maxRunners)" end) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
-jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then (if .osType == "Windows" then "unqualified Windows image (disabled)" else "shared RUNNER_IMAGE_ID" end) else "pool imageId override" end)"' <<<"$RUNNER_POOLS_JSON"
+jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then (if .osType == "Windows" then "unqualified Windows image (disabled)" else "shared RUNNER_IMAGE_ID" end) else "pool imageId override" end); OS tag: \(.osType // "Linux")"' <<<"$RUNNER_POOLS_JSON"
 echo "Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 echo "Windows profiles:    explicit qualified imageId required; image build is separate"
 

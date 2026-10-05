@@ -103,7 +103,7 @@ on: workflow_dispatch
 
 jobs:
   verify:
-    runs-on: avp-linux-m
+    runs-on: [Linux, avp-linux-m]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v5
@@ -163,3 +163,5 @@ The existing CI workflow also validates `image/windows-runner.pkr.hcl` without p
 Go tests additionally cover mixed-OS image/checksum isolation, disabled placeholders, rejection of password inputs, Windows computer-name uniqueness, Azure-generated secure defaults without password values/outputs, no repeat PUT after a lost response, deployment metadata removal, cancel-before-delete ordering, and no billable resources for an unqualified profile. Existing race tests for profile isolation, simultaneous claims, restart adoption, demand above 20, job completion, quota backoff, and cleanup remain applicable to both OS types.
 
 Source checks do not qualify a Windows image. Follow the bounded [Windows qualification procedure](operations.md#windows-profile-qualification) before enabling a profile. In addition to a real .NET/Node/Git job, inspect that the generalized image contains no Packer account, private build credential, JIT registration, or one-shot marker; runtime WinRM/RDP must be disabled. Collect Windows diagnostics before deletion during failure qualification. Test controller restart/cancellation during template provisioning to prove no late VM appears after cleanup, and verify all tagged VMs, disks, NICs, public IPs, and deployment records are removed.
+
+OS-label regression checks cover automatic `Linux`/`Windows` scale-set labels, canonical deduplication of explicit matching OS labels, preservation of both legacy aliases, shared OS tags with unique profile labels, and rejection of mismatched or OS-only configurations. Before activation, compare Azure what-if results with Windows disabled and with only the bounded trial profile enabled: the existing lifecycle role must gain exactly six ARM deployment actions at the same resource-group scope. Re-disable and reprovision after the trial to remove them. Read back GitHub scale-set labels and execute combined-label smoke jobs before migrating existing custom-runner workflows.

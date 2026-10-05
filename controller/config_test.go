@@ -176,7 +176,7 @@ func TestLegacyRunnerIdentityHardwareAndImageRemainPinned(t *testing.T) {
 		t.Fatal("legacy identity, hardware, image, or ownership changed")
 	}
 	labels := legacy.ScaleSetLabels()
-	if len(labels) != 2 || labels[0].Name != "avp-linux" || labels[1].Name != "avp-linux-l" {t.Fatal("legacy label or alias changed")}
+	if len(labels) != 3 || labels[0].Name != "avp-linux" || labels[1].Name != "avp-linux-l" || labels[2].Name != "Linux" {t.Fatal("legacy label or alias changed")}
 	if legacy.MaxRunners != 0 {t.Fatal("legacy environment cap leaked into uncapped profile")}
 }
 

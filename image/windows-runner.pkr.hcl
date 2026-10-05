@@ -22,6 +22,14 @@ variable "build_source_cidr" {
     error_message = "Supply the approved image builder's single public IPv4 /32; broad ingress is not accepted."
   }
 }
+variable "allow_unverified_winrm_certificate" {
+  type    = bool
+  default = false
+  validation {
+    condition     = var.allow_unverified_winrm_certificate
+    error_message = "This builder uses an ephemeral self-signed WinRM certificate. Explicitly approve that temporary certificate-validation exception before setting allow_unverified_winrm_certificate=true."
+  }
+}
 variable "base_image_version" {
   type    = string
   default = "26100.33438.260905"
@@ -45,6 +53,7 @@ source "azure-arm" "windows_runner" {
   location                          = var.location
   managed_image_resource_group_name = var.resource_group_name
   managed_image_name                = var.managed_image_name
+  managed_image_storage_account_type = "Premium_LRS"
   os_type                           = "Windows"
   image_publisher                   = "MicrosoftWindowsServer"
   image_offer                       = "WindowsServer"
@@ -55,7 +64,7 @@ source "azure-arm" "windows_runner" {
   communicator                      = "winrm"
   winrm_username                    = "packer"
   winrm_use_ssl                     = true
-  winrm_insecure                    = true
+  winrm_insecure                    = var.allow_unverified_winrm_certificate
   winrm_timeout                     = "15m"
   allowed_inbound_ip_addresses       = [var.build_source_cidr]
 

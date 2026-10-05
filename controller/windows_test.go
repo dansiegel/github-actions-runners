@@ -79,3 +79,29 @@ func TestWindowsCatalogIsDisabledAndMatchesLinuxHardware(t *testing.T) {
         if linux == nil || windows == nil || windows.OSType != "Windows" || windows.Enabled == nil || *windows.Enabled || windows.VMSize != linux.VMSize || windows.OSDiskTier != linux.OSDiskTier || windows.MaxRunners != 0 { t.Fatalf("invalid Windows counterpart %s", suffix) }
     }
 }
+
+func TestOperatingSystemTagsPreserveUniqueProfileRouting(t *testing.T) {
+    c := validConfig()
+    c.Pools = []RunnerPool{
+        {Name:"legacy", VMSize:"Standard_D4s_v5", Labels:[]string{"avp-linux","avp-linux-l"}},
+        {Name:"medium", VMSize:"Standard_D2s_v5", Labels:[]string{"avp-linux-m","linux"}},
+        {Name:"windows", VMSize:"Standard_D4s_v5", OSType:"Windows", ImageID:"/images/windows", Labels:[]string{"avp-windows-lp","WINDOWS"}},
+    }
+    pools,err := c.PoolConfigs()
+    if err != nil {t.Fatal(err)}
+    want := [][]string{{"avp-linux","avp-linux-l","Linux"},{"avp-linux-m","Linux"},{"avp-windows-lp","Windows"}}
+    for i,pool := range pools {
+        labels := pool.ScaleSetLabels()
+        if len(labels)!=len(want[i]) {t.Fatalf("pool %s labels: %v",pool.ScaleSetName,labels)}
+        for j,label := range labels {if label.Name!=want[i][j] {t.Fatalf("pool %s label %d: %s",pool.ScaleSetName,j,label.Name)}}
+    }
+    // OS tags may repeat across matching pools, but profile aliases cannot.
+    c.Pools[0].Labels = append(c.Pools[0].Labels,"Linux")
+    if err:=c.Validate();err!=nil{t.Fatal(err)}
+    c.Pools[1].Labels = []string{"avp-linux","Linux"}
+    if c.Validate()==nil{t.Fatal("duplicate profile label accepted")}
+    for _,labels := range [][]string{{"Windows","profile"},{"macOS","profile"},{"Linux"}} {
+        c:=validConfig();c.Labels=labels
+        if c.Validate()==nil{t.Fatalf("invalid Linux routing labels accepted: %v",labels)}
+    }
+}

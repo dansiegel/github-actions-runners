@@ -47,13 +47,15 @@ Copy [runner-pools.example.json](runner-pools.example.json) to a deployment-priv
 - 2 CPUs / 8 GiB (`Standard_D2s_v5`), 4 CPUs / 16 GiB (`Standard_D4s_v5`), and 8 CPUs / 32 GiB (`Standard_D8s_v5`), each with P10 and P20 disks, are enabled.
 - 1 CPU / 2 GiB (`Standard_F1als_v7`), with P10 and P20 disks, is disabled pending Gen2/NVMe-compatible Compute Gallery image and subscription qualification. Do not enable these profiles against the existing managed image.
 
-Each job chooses one complete profile label: `avp-linux-s`, `avp-linux-sp`, `avp-linux-m`, `avp-linux-mp`, `avp-linux-l`, `avp-linux-lp`, `avp-linux-xl`, or `avp-linux-xlp`. Size codes mean small (1 CPU / 2 GiB), medium (2 / 8), large (4 / 16), and extra-large (8 / 32). Base labels select P10; the attached `p` selects P20 as the higher-performance disk convention. Both disk classes use `Premium_LRS`.
+Each job chooses one complete profile label plus the OS tag, for example `runs-on: [Linux, avp-linux-m]`. The Linux profile labels are: `avp-linux-s`, `avp-linux-sp`, `avp-linux-m`, `avp-linux-mp`, `avp-linux-l`, `avp-linux-lp`, `avp-linux-xl`, or `avp-linux-xlp`. Size codes mean small (1 CPU / 2 GiB), medium (2 / 8), large (4 / 16), and extra-large (8 / 32). Base labels select P10; the attached `p` selects P20 as the higher-performance disk convention. Both disk classes use `Premium_LRS`.
 
 The pool `name` is its stable GitHub logical scale-set identity, independent of its SKU or image; workflow routing uses its configured `labels`. The existing `avp-linux` logical scale set retains its `avp-linux` label and gains `avp-linux-l` as an alias for the identical 4-CPU / 16-GiB / P10 profile. Existing consumers keep the qualified image, group, and priority with no migration deadline. Pin that image using the pool's optional `imageId` in the private deployment configuration if the shared `RUNNER_IMAGE_ID` will change. All other example names match their profile label. The example has no configured runner caps; omission of `maxRunners` explicitly follows uncapped demand.
 
+The controller automatically advertises `Linux` or `Windows` alongside each pool’s profile labels, based on `osType`. Matching OS tags may be shared; profile labels remain unique.
+
 All enabled pools run in one shared controller with the original Azure resource name; pool order does not create or rename controllers. An omitted or empty Linux per-pool `imageId` inherits `RUNNER_IMAGE_ID`. Windows profiles require `osType: "Windows"`, their own qualified `imageId`; they never inherit the Linux image. Image compatibility must be qualified for every enabled SKU.
 
-Windows jobs use `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, or `avp-windows-xlp` with the identical hardware/disk mapping. All six are disabled until their image, credentials, access, cost, and runtime lifecycle are qualified. Windows S/SP are excluded: their 2 GiB of RAM falls below the 4-GiB Visual Studio Build Tools minimum. Linux retains its planned small profiles. The separate [Windows image](image/windows-runner.pkr.hcl) includes a lightweight .NET/Node/Git/PowerShell toolchain; Visual Studio workloads and interactive UI tests are not implied. See [Windows activation](docs/operations.md#windows-profile-qualification) and [Linux/Windows costs](docs/configuration.md#linux-versus-windows-costs).
+Windows jobs use the `Windows` tag with `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, or `avp-windows-xlp` with the identical hardware/disk mapping. All six are disabled until their image, credentials, access, cost, and runtime lifecycle are qualified. Windows S/SP are excluded: their 2 GiB of RAM falls below the 4-GiB Visual Studio Build Tools minimum. Linux retains its planned small profiles. The separate [Windows image](image/windows-runner.pkr.hcl) includes a lightweight .NET/Node/Git/PowerShell toolchain; Visual Studio workloads and interactive UI tests are not implied. See [Windows activation](docs/operations.md#windows-profile-qualification) and [Linux/Windows costs](docs/configuration.md#linux-versus-windows-costs).
 
 An optional per-pool `osDiskTier` selects capacity-backed Premium SSD performance. The example explicitly selects P10 or P20. Review the [mapping, VM limits, and cost](docs/configuration.md#optional-os-disk-performance) before activating a profile.
 
@@ -112,7 +114,7 @@ Then run the apply command without `--bootstrap-only` / `-BootstrapOnly`. It bui
 Before migrating workflows, grant the runner group access only to intended trusted private/internal repositories. A workflow selects exactly one complete CPU/memory/disk profile by label:
 
 ```yaml
-runs-on: avp-linux-m
+runs-on: [Linux, avp-linux-m]
 ```
 
 See [workflow migration](docs/migration.md), [configuration](docs/configuration.md), and [operations](docs/operations.md) for rollout and verification.
