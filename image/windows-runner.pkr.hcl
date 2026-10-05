@@ -24,7 +24,7 @@ variable "build_source_cidr" {
 }
 variable "base_image_version" {
   type    = string
-  default = "latest"
+  default = "26100.33438.260905"
 }
 variable "runner_version" {
   type    = string
@@ -48,7 +48,7 @@ source "azure-arm" "windows_runner" {
   os_type                           = "Windows"
   image_publisher                   = "MicrosoftWindowsServer"
   image_offer                       = "WindowsServer"
-  image_sku                         = "2025-datacenter"
+  image_sku                         = "2025-datacenter-g2"
   image_version                     = var.base_image_version
   vm_size                           = "Standard_D4s_v5"
   os_disk_size_gb                    = 128

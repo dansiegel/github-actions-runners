@@ -54,7 +54,7 @@ $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 [Environment]::SetEnvironmentVariable('DOTNET_NOLOGO', '1', 'Machine')
 
 @{
-    os = 'Windows'; baseImage = "MicrosoftWindowsServer:WindowsServer:2025-datacenter:$env:BASE_IMAGE_VERSION"
+    os = 'Windows'; baseImage = "MicrosoftWindowsServer:WindowsServer:2025-datacenter-g2:$env:BASE_IMAGE_VERSION"
     runnerVersion = $env:RUNNER_VERSION; runnerSHA256 = $env:RUNNER_SHA256
     dotnet = '10.0.401'; dotnetSHA512 = $dotnetFile.hash
     node = '24.21.0'; nodeSHA256 = $nodeHash
