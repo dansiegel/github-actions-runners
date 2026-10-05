@@ -84,5 +84,5 @@ jobs:
           pwsh -NoProfile -File scripts/destroy-azure.ps1 \
             -SubscriptionId 00000000-0000-0000-0000-000000000000
 
-      - name: Verify per-pool disk opt-in and rejection
+      - name: Verify pool capacity, enablement, and disk tiers
         run: pwsh -NoProfile -File scripts/Test-RunnerDiskTier.ps1

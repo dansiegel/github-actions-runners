@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +20,7 @@ const (
 )
 
 type Config struct {
+	Pools           []RunnerPool
 	RegistrationURL string
 	ScaleSetName    string
 	RunnerGroup     string
@@ -50,6 +54,44 @@ type Config struct {
 	LogLevel             string
 }
 
+// RunnerPool describes a logical GitHub queue, not an always-on Azure resource.
+// A missing or zero MaxRunners follows demand without an operator-imposed cap.
+type RunnerPool struct {
+	Name       string   `json:"name"`
+	VMSize     string   `json:"vmSize"`
+	MaxRunners int      `json:"maxRunners"`
+	Priority   string   `json:"priority"`
+	Labels     []string `json:"labels"`
+	OSDiskTier string   `json:"osDiskTier"`
+	Enabled    *bool    `json:"enabled,omitempty"`
+	ImageID    string   `json:"imageId,omitempty"`
+}
+
+func (p *RunnerPool) UnmarshalJSON(data []byte) error {
+	type poolJSON RunnerPool
+	var decoded poolJSON
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true}
+	for key := range fields {
+		if !allowed[key] { return fmt.Errorf("unknown runner pool field %q", key) }
+	}
+	for _, key := range []string{"maxRunners", "enabled", "imageId"} {
+		if value, present := fields[key]; present && strings.TrimSpace(string(value)) == "null" {
+			return fmt.Errorf("%s cannot be null", key)
+		}
+	}
+	*p = RunnerPool(decoded)
+	return nil
+}
+
 func LoadConfig() (Config, error) {
 	c := Config{
 		RegistrationURL: env("GITHUB_CONFIG_URL", ""),
@@ -81,7 +123,7 @@ func LoadConfig() (Config, error) {
 	if c.MinRunners, err = envInt("MIN_RUNNERS", 0); err != nil {
 		return Config{}, err
 	}
-	if c.MaxRunners, err = envInt("MAX_RUNNERS", 10); err != nil {
+	if c.MaxRunners, err = envInt("MAX_RUNNERS", 0); err != nil {
 		return Config{}, err
 	}
 	if c.GitHubApp.InstallationID, err = envInt64("GITHUB_APP_INSTALLATION_ID", 0); err != nil {
@@ -105,11 +147,23 @@ func LoadConfig() (Config, error) {
 	if c.MaxRunnerAge, err = envDuration("RUNNER_MAX_AGE", 12*time.Hour); err != nil {
 		return Config{}, err
 	}
+	if raw := env("RUNNER_POOLS_JSON", ""); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &c.Pools); err != nil {
+			return Config{}, fmt.Errorf("RUNNER_POOLS_JSON must be a runner pool array: %w", err)
+		}
+		if len(c.Pools) == 0 {
+			return Config{}, fmt.Errorf("RUNNER_POOLS_JSON must contain at least one pool")
+		}
+	}
 
 	return c, c.Validate()
 }
 
 func (c *Config) Validate() error {
+	if len(c.Pools) > 0 {
+		_, err := c.PoolConfigs()
+		return err
+	}
 	parsed, err := url.ParseRequestURI(c.RegistrationURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return fmt.Errorf("GITHUB_CONFIG_URL must be a full HTTPS repository, organization, or enterprise URL")
@@ -134,8 +188,8 @@ func (c *Config) Validate() error {
 	if c.MinRunners != 0 {
 		return fmt.Errorf("MIN_RUNNERS must be 0 so runner compute scales completely to zero")
 	}
-	if c.MaxRunners < 1 || c.MaxRunners > 20 {
-		return fmt.Errorf("MAX_RUNNERS must be between 1 and 20 for each pool")
+	if c.MaxRunners < 0 || c.MaxRunners > math.MaxInt32 {
+		return fmt.Errorf("MAX_RUNNERS must be 0 (uncapped) or a positive int32")
 	}
 	for name, value := range map[string]string{
 		"AZURE_SUBSCRIPTION_ID":       c.SubscriptionID,
@@ -158,8 +212,8 @@ func (c *Config) Validate() error {
 	if _, err := c.EffectiveOSDiskSizeGB(); err != nil {
 		return err
 	}
-	if c.ProvisionConcurrency < 1 || c.ProvisionConcurrency > 20 {
-		return fmt.Errorf("PROVISION_CONCURRENCY must be between 1 and 20")
+	if c.ProvisionConcurrency < 1 {
+		return fmt.Errorf("PROVISION_CONCURRENCY must be positive")
 	}
 	if c.ReconcileInterval < 15*time.Second {
 		return fmt.Errorf("RECONCILE_INTERVAL must be at least 15s")
@@ -171,6 +225,73 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("RUNNER_MAX_AGE must be at least 1h")
 	}
 	return nil
+}
+
+// PoolConfigs also validates disabled profiles so that enabling one cannot
+// silently introduce an ambiguous label or an invalid disk configuration.
+func (c Config) PoolConfigs() ([]Config, error) {
+	if len(c.Pools) == 0 {
+		if err := c.Validate(); err != nil {
+			return nil, err
+		}
+		return []Config{c}, nil
+	}
+	names := make(map[string]bool)
+	labels := make(map[string]string)
+	result := make([]Config, 0, len(c.Pools))
+	for _, pool := range c.Pools {
+		name := strings.TrimSpace(pool.Name)
+		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`).MatchString(name) || names[strings.ToLower(name)] {
+			return nil, fmt.Errorf("runner pool names must be valid and unique: %q", name)
+		}
+		names[strings.ToLower(name)] = true
+		p := c
+		p.Pools = nil
+		p.ScaleSetName = name
+		p.VMSize = strings.TrimSpace(pool.VMSize)
+		if !regexp.MustCompile(`^Standard_[A-Za-z0-9_]+$`).MatchString(p.VMSize) {
+			return nil, fmt.Errorf("runner pool %q has an invalid VM size", name)
+		}
+		p.MaxRunners = pool.MaxRunners
+		p.VMPriority = strings.TrimSpace(pool.Priority)
+		if p.VMPriority == "" {
+			p.VMPriority = "Regular"
+		}
+		p.OSDiskTier = strings.TrimSpace(pool.OSDiskTier)
+		if imageID := strings.TrimSpace(pool.ImageID); imageID != "" {
+			p.ImageID = imageID
+		}
+		p.Labels = append([]string(nil), pool.Labels...)
+		if len(p.Labels) == 0 {
+			p.Labels = []string{name}
+		}
+		if err := p.Validate(); err != nil {
+			return nil, fmt.Errorf("runner pool %q: %w", name, err)
+		}
+		for _, label := range p.Labels {
+			key := strings.ToLower(strings.TrimSpace(label))
+			if owner, ok := labels[key]; ok {
+				return nil, fmt.Errorf("runner label %q is repeated in pools %q and %q", label, owner, name)
+			}
+			labels[key] = name
+		}
+		if pool.Enabled == nil || *pool.Enabled {
+			result = append(result, p)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("at least one runner pool must be enabled")
+	}
+	return result, nil
+}
+
+func (c Config) ListenerMaxRunners() int {
+	if c.MaxRunners == 0 {
+		// The GitHub message protocol requires a finite int32. SDK zero means
+		// no capacity, so it must not be used for an uncapped operator setting.
+		return math.MaxInt32
+	}
+	return c.MaxRunners
 }
 
 func (c Config) ScaleSetLabels() []scaleset.Label {

@@ -20,10 +20,10 @@ param runnerGroup string = 'default'
 @minLength(1)
 param runnerScaleSetName string = 'azure-linux'
 
-@description('Maximum concurrent ephemeral runner VMs. Used only when runnerPoolsBase64 is empty.')
-@minValue(1)
-@maxValue(20)
-param maxRunners int = 10
+@description('Optional concurrent runner limit. Zero follows demand without a configured cap. Used only when runnerPoolsBase64 is empty.')
+@minValue(0)
+@maxValue(2147483647)
+param maxRunners int = 0
 
 @description('Azure VM size used for each ephemeral runner. Used only when runnerPoolsBase64 is empty.')
 param runnerVmSize string = 'Standard_D4s_v5'
@@ -38,7 +38,7 @@ param runnerImageId string = ''
 ])
 param runnerVmPriority string = 'Regular'
 
-@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, maxRunners, priority, labels, and optional osDiskTier. Empty uses the single-pool parameters for compatibility.')
+@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, optional maxRunners (zero or omitted is uncapped), priority, labels, osDiskTier, and optional enabled (defaults true). Empty uses the single-pool parameters for compatibility.')
 param runnerPoolsBase64 string = ''
 
 @description('Linux admin user for emergency access. The subnet NSG denies inbound Internet traffic.')
