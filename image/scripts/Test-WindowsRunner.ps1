@@ -87,6 +87,82 @@ function Test-WindowsBuildRemoting {
 }
 Test-WindowsBuildRemoting
 
+function Test-WindowsImageAccountCleanup {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $state = @{ users = @{}; productType = 3; renameNoOp = $false; disableNoOp = $false; deleteNoOp = $false; calls = [Collections.Generic.List[string]]::new() }
+    function Get-CimInstance { param($ClassName) return [pscustomobject]@{ ProductType = $state.productType } }
+    function Get-LocalUser {
+        [CmdletBinding()] param($SID)
+        if ($SID) { return $state.users[$SID.Value] }
+        return @($state.users.Values)
+    }
+    function Rename-LocalUser { [CmdletBinding()] param($SID, $NewName) $state.calls.Add('rename'); if (-not $state.renameNoOp) { $state.users[$SID.Value].Name = $NewName } }
+    function Disable-LocalUser { [CmdletBinding()] param($SID) $state.calls.Add('disable'); if (-not $state.disableNoOp) { $state.users[$SID.Value].Enabled = $false } }
+    function Remove-LocalUser { [CmdletBinding()] param($SID) $state.calls.Add('delete'); if (-not $state.deleteNoOp) { $state.users.Remove($SID.Value) } }
+    function Set-TestBuildAccount {
+        param([string] $Sid = 'S-1-5-21-1-2-3-500')
+        $state.users.Clear(); $state.calls.Clear()
+        $state.productType = 3; $state.renameNoOp = $false; $state.disableNoOp = $false; $state.deleteNoOp = $false
+        $state.users[$Sid] = [pscustomobject]@{ Name = 'packer'; SID = [pscustomobject]@{ Value = $Sid }; Enabled = $true }
+    }
+    Set-TestBuildAccount
+    $before = Get-WindowsImageBuildAccount
+    if ($before.mode -ne 'BuiltinAdministrator' -or $state.calls.Count) { throw 'Account preflight mutated the host' }
+    $cleanup = Remove-WindowsImageBuildAccount -Expected $before
+    Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'
+    if (($state.calls -join ',') -ne 'rename,disable') { throw 'RID500 was deleted or left active' }
+    $state.users[$cleanup.sid].Enabled = $true
+    $rejected = $false
+    try { Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Capture accepted an active image administrator' }
+    $state.users[$cleanup.sid].Enabled = $false
+    $rejected = $false
+    try { Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_COMPLETE' } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Capture accepted incomplete Sysprep' }
+
+    Set-TestBuildAccount
+    $before = Get-WindowsImageBuildAccount
+    $state.users[$before.sid].Name = 'Administrator'
+    $cleanup = Remove-WindowsImageBuildAccount -Expected $before
+    Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'
+    if (($state.calls -join ',') -ne 'disable') { throw 'Canonical built-in account was renamed unnecessarily' }
+
+    Set-TestBuildAccount -Sid 'S-1-5-21-1-2-3-1001'
+    $cleanup = Remove-WindowsImageBuildAccount -Expected (Get-WindowsImageBuildAccount)
+    Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'
+    if ($cleanup.mode -ne 'RemovedLocalUser' -or ($state.calls -join ',') -ne 'delete') { throw 'Ordinary build account was not deleted' }
+
+    foreach ($scenario in @('client', 'special-rid', 'malformed-sid', 'name-collision', 'missing')) {
+        Set-TestBuildAccount
+        switch ($scenario) {
+            'client' { $state.productType = 1 }
+            'special-rid' { Set-TestBuildAccount -Sid 'S-1-5-21-1-2-3-501' }
+            'malformed-sid' { Set-TestBuildAccount -Sid 'S-1-5-18' }
+            'name-collision' { $state.users['other'] = [pscustomobject]@{ Name = 'Administrator'; SID = [pscustomobject]@{ Value = 'S-1-5-21-1-2-3-1002' }; Enabled = $true } }
+            'missing' { $state.users.Clear() }
+        }
+        $rejected = $false
+        try { Get-WindowsImageBuildAccount | Out-Null } catch { $rejected = $true }
+        if (-not $rejected -or $state.calls.Count) { throw "Invalid cleanup preflight changed accounts: $scenario" }
+    }
+    foreach ($scenario in @('rename-no-op', 'disable-no-op', 'delete-no-op', 'identity-changed', 'sid-changed')) {
+        Set-TestBuildAccount -Sid $(if ($scenario -eq 'delete-no-op') { 'S-1-5-21-1-2-3-1001' } else { 'S-1-5-21-1-2-3-500' })
+        $before = Get-WindowsImageBuildAccount
+        switch ($scenario) {
+            'rename-no-op' { $state.renameNoOp = $true }
+            'disable-no-op' { $state.disableNoOp = $true }
+            'delete-no-op' { $state.deleteNoOp = $true }
+            'identity-changed' { $state.users[$before.sid].Name = 'unexpected-account' }
+            'sid-changed' { $state.users[$before.sid].SID.Value = 'S-1-5-21-4-5-6-500' }
+        }
+        $rejected = $false
+        try { Remove-WindowsImageBuildAccount -Expected $before | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw "Account cleanup did not enforce readback: $scenario" }
+    }
+    Write-Output 'Windows image account SID classification, retirement, Server Sysprep gate, and failure readback tests passed.'
+}
+Test-WindowsImageAccountCleanup
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 try {
