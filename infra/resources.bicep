@@ -29,6 +29,7 @@ var runnerSubnetName = 'runners'
 var runnerSubnetAddressPrefix = '10.42.1.0/24'
 var runnerVersion = '2.337.0'
 var runnerSha256 = '70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613'
+var windowsRunnerSha256 = '1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc'
 
 resource runnerNetworkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: 'gha-runners-${resourceToken}-nsg'
@@ -349,6 +350,10 @@ resource runnerController 'Microsoft.App/containerApps@2024-03-01' = if (deployC
             {
               name: 'RUNNER_SHA256'
               value: runnerSha256
+            }
+            {
+              name: 'WINDOWS_RUNNER_SHA256'
+              value: windowsRunnerSha256
             }
             {
               name: 'RUNNER_IDLE_TIMEOUT'

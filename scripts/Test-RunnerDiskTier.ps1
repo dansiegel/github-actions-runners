@@ -34,7 +34,7 @@ function Test-PoolDryRun {
         $normalized = @(Get-NormalizedRunnerPools)
         $source = Get-Content -LiteralPath $poolFile -Raw | ConvertFrom-Json -NoEnumerate
         for ($index = 0; $index -lt $source.Count; $index++) {
-            foreach ($field in @('maxRunners', 'enabled', 'imageId')) {
+            foreach ($field in @('maxRunners', 'enabled', 'imageId', 'osType')) {
                 $present = $null -ne $source[$index].PSObject.Properties[$field]
                 if ($normalized[$index].Contains($field) -ne $present) { throw "Normalization changed presence of $field for $Name" }
                 if ($present) {
@@ -105,8 +105,8 @@ try {
     }
 
     $example = Get-Content (Join-Path $PSScriptRoot '../runner-pools.example.json') -Raw | ConvertFrom-Json -NoEnumerate
-    if ($example.Count -ne 8 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 2) {
-        throw 'Example must have eight profiles with only the two one-core profiles disabled'
+    if ($example.Count -ne 16 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 10) {
+        throw 'Example must have eight Linux profiles and eight disabled Windows profiles, with Linux small profiles also disabled'
     }
     if ($example[0].name -cne 'avp-linux') { throw 'The legacy avp-linux pool must remain first for compatibility values' }
     foreach ($profile in @(@('s', 'Standard_F1als_v7'), @('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
@@ -124,7 +124,22 @@ try {
             if ($profile[0] -cne 's' -and $null -ne $matching[0].PSObject.Properties['enabled']) { throw "Enabled example profile must use the default: $label" }
         }
     }
-    Test-PoolDryRun -Name 'eight example profiles' -Pools $example -Expected @('avp-linux-s: disabled', 'avp-linux-xlp: 0\.\.demand', 'avp-linux labels: avp-linux, avp-linux-l;', 'avp-linux-lp labels: avp-linux-lp;')
+    foreach ($profile in @(@('s', 'Standard_F1als_v7'), @('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
+        foreach ($premium in @($false, $true)) {
+            $label = 'avp-windows-' + $profile[0] + $(if ($premium) { 'p' } else { '' })
+            $tier = if ($premium) { 'P20' } else { 'P10' }
+            $matching = @($example | Where-Object { $_.name -ceq $label -and $_.vmSize -ceq $profile[1] -and $_.osDiskTier -ceq $tier })
+            if ($matching.Count -ne 1 -or $matching[0].enabled -ne $false -or $matching[0].osType -cne 'Windows' -or ($matching[0].labels -join ',') -cne $label) { throw "Incorrect Windows profile: $label" }
+        }
+    }
+    Test-PoolDryRun -Name 'Windows requires a qualified image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows' }) -Valid $false
+    Test-PoolDryRun -Name 'Windows requires secure secret reference' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows' }) -Valid $false
+    $secret = @{ keyVaultId = '/subscriptions/test/resourceGroups/test/providers/Microsoft.KeyVault/vaults/windows'; secretName = 'runner-admin'; secretVersion = ('a' * 32) }
+    Test-PoolDryRun -Name 'qualified Windows reference' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; windowsAdminSecret = $secret }) -Expected @('pool imageId override')
+    foreach ($os in @($null, 'windows', '', 1, $true)) {
+        Test-PoolDryRun -Name 'invalid OS type' -Pools @(@{ name = 'invalid'; vmSize = 'Standard_D4s_v5'; osType = $os }) -Valid $false
+    }
+    Test-PoolDryRun -Name 'Linux and Windows example profiles' -Pools $example -Expected @('avp-linux-s: disabled', 'avp-linux-xlp: 0\.\.demand', 'avp-linux labels: avp-linux, avp-linux-l;', 'avp-linux-lp labels: avp-linux-lp;')
     Write-Output 'Shared-controller pool and disk-tier dry-run validation passed.'
 }
 finally {

@@ -73,5 +73,93 @@
       "avp-linux-xlp"
     ],
     "osDiskTier": "P20"
+  },
+  {
+    "name": "avp-windows-s",
+    "vmSize": "Standard_F1als_v7",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-s"
+    ],
+    "osDiskTier": "P10",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-sp",
+    "vmSize": "Standard_F1als_v7",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-sp"
+    ],
+    "osDiskTier": "P20",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-m",
+    "vmSize": "Standard_D2s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-m"
+    ],
+    "osDiskTier": "P10",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-mp",
+    "vmSize": "Standard_D2s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-mp"
+    ],
+    "osDiskTier": "P20",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-l",
+    "vmSize": "Standard_D4s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-l"
+    ],
+    "osDiskTier": "P10",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-lp",
+    "vmSize": "Standard_D4s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-lp"
+    ],
+    "osDiskTier": "P20",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-xl",
+    "vmSize": "Standard_D8s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-xl"
+    ],
+    "osDiskTier": "P10",
+    "osType": "Windows",
+    "enabled": false
+  },
+  {
+    "name": "avp-windows-xlp",
+    "vmSize": "Standard_D8s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-windows-xlp"
+    ],
+    "osDiskTier": "P20",
+    "osType": "Windows",
+    "enabled": false
   }
 ]

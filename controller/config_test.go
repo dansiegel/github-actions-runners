@@ -119,7 +119,7 @@ func TestExampleProfilesResolveToRequestedHardwareAndDisk(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	config := validConfig()
 	if err := json.Unmarshal(data, &config.Pools); err != nil { t.Fatal(err) }
-	if len(config.Pools) != 8 { t.Fatalf("profile count = %d", len(config.Pools)) }
+	if len(config.Pools) != 16 { t.Fatalf("profile count = %d", len(config.Pools)) }
 	pools, err := config.PoolConfigs()
 	if err != nil { t.Fatal(err) }
 	if len(pools) != 6 { t.Fatalf("qualified profiles = %d", len(pools)) }

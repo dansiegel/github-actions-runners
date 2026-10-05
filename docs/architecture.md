@@ -15,7 +15,7 @@ This is intentionally not Azure Container Apps Jobs: those jobs do not support p
 | Ephemeral Azure VMs | 0 | Execute exactly one job each; independently sized with optional per-pool caps |
 | Managed runner image | Stored | Default .NET 10 / Node 24 / Docker build toolchain, with optional per-pool image overrides |
 | ACR | Basic | Stores the controller image |
-| Key Vault | Empty of runner data | Stores only GitHub App controller credentials |
+| Key Vault | Empty of runner data | Stores GitHub App controller credentials; Windows optionally uses a separate administrator-credential vault |
 | VNet + runner subnet + NSG | No metered gateway | Denies Internet ingress to runner public IPs |
 | Log Analytics | Usage based | Stores all controller logs |
 
@@ -28,7 +28,9 @@ Each pool defines:
 - `maxRunners`: optional concurrent VM cap; zero or omission follows demand without a configured cap, while a positive integer up to 2,147,483,647 sets a cap;
 - `priority`: `Regular` or `Spot`;
 - `labels`: complete profile labels registered on the GitHub logical scale set; each job selects one;
-- `imageId`: optional image resource ID override; an omitted or empty string inherits `RUNNER_IMAGE_ID`;
+- `imageId`: optional image resource ID override; Linux inherits `RUNNER_IMAGE_ID` when omitted/empty; Windows requires an explicit qualified image;
+- `osType`: `Linux` (default) or `Windows`;
+- `windowsAdminSecret`: Windows-only, pinned Key Vault secret reference resolved by Azure;
 - `osDiskTier`: optional capacity-backed Premium SSD tier;
 - `enabled`: optional boolean, defaulting to true; false prevents starting that profile's listener and VMs.
 
@@ -46,7 +48,7 @@ For each pool:
 4. Target VM count follows `TotalAssignedJobs`, bounded only when `maxRunners` is positive; minimum runners is validated to exactly zero.
 5. Every new runner gets a unique JIT configuration and Azure VM using the pool's VM size.
 6. A `JobStarted` event protects the VM as busy.
-7. A `JobCompleted` event starts deletion. The VM also powers off when `run.sh` exits.
+7. A `JobCompleted` event starts deletion. The VM also powers off when Linux `run.sh` or Windows `run.cmd` exits.
 8. The one-minute reconciler deletes stopped/deallocated VMs and hard-expired VMs, and removes the matching GitHub runner registration.
 9. A failed VM create removes the JIT registration it just minted. Quota, allocation, and preempted-create errors pause further creates and leave the listener session running.
 
@@ -78,3 +80,11 @@ The marketplace-image fallback exists for recovery, but it installs Docker and t
 ## Capacity assumptions
 
 Capacity must be budgeted across all enabled pools. The example follows demand without configured runner or total-vCPU caps. Azure quota, regional SKU availability, subnet addresses, and provisioning throughput remain practical limits. Positive per-pool caps are optional and do not enforce a subscription-wide global budget. The disabled one-core profiles require a qualified Gen2/NVMe Compute Gallery image and subscription before activation.
+
+## Windows provisioning
+
+Linux continues to use its existing direct VM API/cloud-init path. Windows uses an incremental ARM deployment for the VM so Azure can resolve the administrator password from a Key Vault secure-parameter reference; the controller handles only identifiers. JIT custom data is also a secure template parameter. The VM has no managed identity and uses the same resource tags, independent listener/state, reservations, demand-driven limits, reconciliation, and cleanup as Linux.
+
+Azure Windows custom data is not executable. A trusted startup task baked into the qualified image reads the data-only JSON envelope, checks the runner version/checksum against the image manifest, consumes and removes the local JIT payload, runs exactly one job as SYSTEM, and shuts down. A durable exclusive-create marker prevents replay after reboot; scheduled-task instance policy prevents parallel startup. The bootstrap does not download a replacement runner at runtime. A mismatch requires a newly qualified image.
+
+Completed deployment metadata is deleted without deleting the VM. Cleanup cancels any in-flight deployment and waits for a terminal state **before** deleting VM/NIC/IP resources, preventing a late template create from resurrecting an orphan. NIC/PIP tags exist before deployment, so startup orphan adoption also covers an interrupted Windows deployment. Nested Azure quota/allocation error codes feed the existing backoff policy. The Linux API path does not acquire additional privileges through this change.

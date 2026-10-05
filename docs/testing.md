@@ -6,8 +6,8 @@ Controller unit tests cover:
 
 - configuration rejects any nonzero minimum and invalid caps, while zero or omitted caps follow demand;
 - pool JSON preserves independent CPU/disk settings, optional image overrides, optional caps, and disabled profiles;
-- the eight profile labels map to the expected SKUs and tiers, with only small profiles disabled and `avp-linux-l` aliasing the existing `avp-linux` identity;
-- omitted or empty image overrides inherit the shared image; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
+- the eight Linux and eight Windows profile labels map to the expected SKUs and tiers, with all Windows and Linux small profiles disabled and `avp-linux-l` aliasing the existing `avp-linux` identity;
+- omitted or empty Linux image overrides inherit the shared image; Windows never inherits it; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
 - demand above 20 is supported, and positive optional caps are respected;
 - a desired count of zero removes all known-idle VMs;
 - busy runners survive queue-driven scale-down and are removed after `JobCompleted`;
@@ -155,3 +155,11 @@ The implementation is ready for repository migration only when:
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;
 - a controlled parallel test proves the required concurrency without quota failures.
+
+## Windows source and runtime tests
+
+The existing CI workflow also validates `image/windows-runner.pkr.hcl` without provisioning, parses every Windows image script, and runs `image/scripts/Test-WindowsRunner.ps1` on a GitHub-hosted Windows worker using Windows PowerShell 5.1. Fixtures cover raw/base64 custom data, strict schema, pinned version/checksum, payload deletion before the job, one-shot/reboot rejection, runner exit codes, and cleanup after failure. No fixture creates an Azure resource, enters a password, installs the image toolchain, or changes host remoting.
+
+Go tests additionally cover mixed-OS image/checksum isolation, disabled placeholders, fail-closed credential references, Windows computer-name uniqueness, secure ARM template parameters, deployment metadata removal, cancel-before-delete ordering, and no billable resources for an unqualified profile. Existing race tests for profile isolation, simultaneous claims, restart adoption, demand above 20, job completion, quota backoff, and cleanup remain applicable to both OS types.
+
+Source checks do not qualify a Windows image. Follow the bounded [Windows qualification procedure](operations.md#windows-profile-qualification) before enabling a profile. In addition to a real .NET/Node/Git job, inspect that the generalized image contains no Packer account, private build credential, JIT registration, or one-shot marker; runtime WinRM/RDP must be disabled. Collect Windows diagnostics before deletion during failure qualification. Test controller restart/cancellation during template provisioning to prove no late VM appears after cleanup, and verify all tagged VMs, disks, NICs, public IPs, and deployment records are removed.

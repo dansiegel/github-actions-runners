@@ -2,7 +2,7 @@
 
 ## Trust model
 
-These runners execute repository-controlled code with Docker access. Access to any configured runner pool is therefore equivalent to access to a short-lived privileged Linux host and its network path.
+These runners execute repository-controlled code with Docker access. Access to any configured runner pool is therefore equivalent to access to a short-lived privileged Linux or Windows host and its network path.
 
 Use these pools only for trusted private/internal repositories whose workflows and pull-request policies are controlled. Do not grant public repositories or untrusted fork pull requests access without a separate threat review and isolation design.
 
@@ -83,7 +83,7 @@ does not apply to long-lived hosts and does not claim a particular kernel regres
 
 ## Logging and incident response
 
-Controller logs go to Log Analytics. Runner bootstrap and runner diagnostic tails are written to the serial console and captured by managed boot diagnostics. GitHub retains workflow job logs.
+Controller logs go to Log Analytics. Linux bootstrap and runner diagnostic tails are written to the serial console and captured by managed boot diagnostics. Windows records bootstrap exit status in `C:\ProgramData\GitHubRunner\result.json` and runner diagnostics under `C:\actions-runner\_diag`; these are ephemeral and are not automatically exported to Log Analytics. Collect a failing qualification VM’s diagnostics through an approved operator route before cleanup when needed. GitHub retains workflow job logs.
 
 On suspected runner compromise:
 
@@ -92,3 +92,13 @@ On suspected runner compromise:
 3. Preserve relevant GitHub and Azure logs before deleting resources.
 4. Rotate any workflow-accessible credentials used by the affected repository.
 5. Rebuild the managed image and redeploy before restoring access.
+
+## Windows credential and image boundary
+
+Windows activation requires a separate explicit access review. An enabled profile references a user-provisioned administrator secret in a **dedicated** Key Vault; do not enable template access on the GitHub App credential vault. Azure resolves the reference server-side. The controller never generates, receives, stores, or submits the password. Secret entry/rotation is an operator secure handoff, never chat or a command containing its value. Pin the version, scope its use to the approved Windows qualification/fleet, and retire that version after all dependent VMs are deleted. The secret remains in Key Vault until the operator rotates/retires it; VM deletion alone does not rotate it.
+
+The dedicated vault must allow template deployment, and the controller needs `Microsoft.KeyVault/vaults/deploy/action` at that vault plus ARM deployment lifecycle operations in the runner resource group. The default infrastructure intentionally does not grant these new permissions or modify a vault. This prevents a source-only update from expanding persistent access. Review and approve those exact scopes before an operator configures them. The controller's existing resource-type permissions still constrain template resources; no role-assignment or arbitrary-subscription privilege is required.
+
+Packer's Windows build uses temporary WinRM-over-TLS restricted to one approved builder IPv4 `/32`, with an ephemeral self-signed certificate. Executing that build requires explicit operator approval of temporary credential handling, certificate validation, and ingress. No credential is checked into this repository. Remove the build account, temporary WinRM listeners, and their TLS private keys before capture; verify that no private credential or registration state remains in the generalized image. First boot removes build remoting listeners, disables WinRM/RDP, and refuses an image retaining the build account. Do not route production jobs until this is tested on an actual Azure VM.
+
+Windows jobs run as SYSTEM in a disposable VM, without an interactive desktop session. This is privileged execution, like Linux passwordless sudo, not a process sandbox. The image contains pinned GitHub runner, .NET SDK, Node, Git, and PowerShell tools. No Visual Studio/Build Tools or Windows SDK workload is installed or licensed by this change. Those workloads need a separate compatible image, license/entitlement review, and memory/disk qualification. Windows automatic updates are disabled during jobs; the same immutable image refresh ownership and security-update cadence described above applies.

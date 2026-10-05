@@ -24,7 +24,7 @@ There are no default subscription or organization values.
 
 ## Runner pool JSON
 
-`runner-pools.example.json` documents the supported shape. Each entry accepts only `name`, `vmSize`, `maxRunners`, `priority`, `labels`, `osDiskTier`, `enabled`, and `imageId`; unknown keys are rejected:
+`runner-pools.example.json` documents the supported shape. Each entry accepts only `name`, `vmSize`, `maxRunners`, `priority`, `labels`, `osDiskTier`, `enabled`, `imageId`, `osType`, and `windowsAdminSecret`; unknown keys are rejected:
 
 ```json
 [
@@ -38,7 +38,7 @@ There are no default subscription or organization values.
 ]
 ```
 
-The scripts require a nonempty array with unique pool names and labels, at least one enabled pool, and no fixed pool-count limit. `maxRunners` is optional: omission or `0` means uncapped demand; a positive integer through 2,147,483,647 is an explicit per-pool cap. Negative, fractional, string, boolean, or null caps are rejected. `enabled` is an optional boolean, defaulting to true. False leaves a profile configured without starting its listener or VMs. `imageId` is an optional string; omission, an empty string, or whitespace inherits the shared `RUNNER_IMAGE_ID`, while a nonempty value overrides it for that pool. Null and non-string values are rejected, and omitted values stay omitted during normalization. Missing `priority` defaults to `Regular`; missing or empty `labels` defaults to the pool name. Keep deployment-specific copies outside this public repository when their labels or topology are sensitive.
+The scripts require a nonempty array with unique pool names and labels, at least one enabled pool, and no fixed pool-count limit. `maxRunners` is optional: omission or `0` means uncapped demand; a positive integer through 2,147,483,647 is an explicit per-pool cap. Negative, fractional, string, boolean, or null caps are rejected. `enabled` is an optional boolean, defaulting to true. False leaves a profile configured without starting its listener or VMs. `imageId` is an optional string; for Linux, omission, an empty string, or whitespace inherits the shared `RUNNER_IMAGE_ID`, while a nonempty value overrides it for that pool. Null and non-string values are rejected, and omitted values stay omitted during normalization. Missing `priority` defaults to `Regular`; missing or empty `labels` defaults to the pool name. Keep deployment-specific copies outside this public repository when their labels or topology are sensitive.
 
 The profile labels define complete workload choices:
 
@@ -148,7 +148,7 @@ The shared Container App resolves the secrets through its user-assigned identity
 
 ## Runner image
 
-`image/runner.pkr.hcl` builds the default Ubuntu 24.04 managed image. Pools inherit its `RUNNER_IMAGE_ID` unless they set a nonempty `imageId` override; each selected image must be compatible with that pool's VM family. Its contents include GitHub Actions runner 2.337.0, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and Bicep CLI, `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools. A VM still replaces the baked runner when `.installed-version` does not match `RUNNER_VERSION`, because GitHub rejects job messages from a deprecated runner build.
+`image/runner.pkr.hcl` builds the default Ubuntu 24.04 managed image. Linux pools inherit its `RUNNER_IMAGE_ID` unless they set a nonempty `imageId` override; each selected image must be compatible with that pool's VM family. Its contents include GitHub Actions runner 2.337.0, .NET SDK 10.0, Node.js 24, Docker Engine, Azure CLI and Bicep CLI, `azd`, PowerShell, Aspire CLI 13.4.6, Java 21, and common build tools. A VM still replaces the baked runner when `.installed-version` does not match `RUNNER_VERSION`, because GitHub rejects job messages from a deprecated runner build.
 
 Resolved versions, the verified booted kernel and the package-inventory hash are written
 to `/opt/runner-image/manifest.txt`; `/opt/runner-image/packages.tsv` contains the installed
@@ -165,3 +165,51 @@ Capacity changes require updating the relevant pool's `maxRunners` or `vmSize` a
 ## Spot runners
 
 Set a pool's `priority` to `Spot` only for retry-safe workflows. Spot VMs use `evictionPolicy=Delete`, so an Azure eviction terminates the current job. Regular capacity remains the default.
+
+## Windows profile schema
+
+`osType` is optional and defaults to `Linux`; when present it must be exactly `Linux` or `Windows`. Windows profiles never inherit the shared Linux image. An enabled Windows profile requires a nonempty, qualified `imageId` and `windowsAdminSecret`:
+
+```json
+{
+  "name": "avp-windows-lp",
+  "labels": ["avp-windows-lp"],
+  "osType": "Windows",
+  "vmSize": "Standard_D4s_v5",
+  "osDiskTier": "P20",
+  "imageId": "/subscriptions/example/resourceGroups/runners/providers/Microsoft.Compute/images/qualified-windows",
+  "windowsAdminSecret": {
+    "keyVaultId": "/subscriptions/example/resourceGroups/runners/providers/Microsoft.KeyVault/vaults/windows-credentials",
+    "secretName": "runner-admin",
+    "secretVersion": "00000000000000000000000000000000"
+  },
+  "enabled": false
+}
+```
+
+These are resource references, not secret values. Use the actual, pinned secret version in private deployment configuration after operator setup. The controller never generates, reads, or sends a Windows administrator password. Azure resolves the Key Vault reference into a `securestring` template parameter; no password belongs in pool JSON, image, logs, command line, or repository. This reference is Windows-only and accepts exactly the three nonempty fields shown; the version must be 32 hexadecimal characters. Disabled Windows placeholders may omit image and secret references. Enabling a placeholder without both fails validation before network resources are created.
+
+The eight Windows labels replace only the `linux` part of the Linux names: `avp-windows-s`, `avp-windows-sp`, `avp-windows-m`, `avp-windows-mp`, `avp-windows-l`, `avp-windows-lp`, `avp-windows-xl`, `avp-windows-xlp`. There is no legacy Windows alias. All Windows entries are disabled in the public example. Linux entries and legacy ownership remain unchanged. `WINDOWS_RUNNER_SHA256` selects the Windows archive checksum for the common `RUNNER_VERSION`; update the baked Windows image and that checksum together.
+
+## Linux versus Windows costs
+
+USD East US 2 pay-as-you-go retail rates checked 2026-10-05. Each rate includes VM compute and a capacity-backed Premium LRS OS disk, using monthly disk price divided by 730 hours. Windows Server licensing is included. No Hybrid Benefit, Spot, reservation, or negotiated discount is assumed.
+
+| Profile suffix | CPU / GiB | OS disk | Linux / hour | Windows / hour | Linux / 30 min | Windows / 30 min |
+|---|---:|---|---:|---:|---:|---:|
+| s* | 1 / 2 | P10 | $0.08505 | $0.13155 | $0.04252 | $0.06577 |
+| sp* | 1 / 2 | P20 | $0.15168 | $0.19818 | $0.07584 | $0.09909 |
+| m | 2 / 8 | P10 | $0.12055 | $0.21255 | $0.06027 | $0.10627 |
+| mp | 2 / 8 | P20 | $0.18718 | $0.27918 | $0.09359 | $0.13959 |
+| l | 4 / 16 | P10 | $0.21655 | $0.40055 | $0.10827 | $0.20027 |
+| lp | 4 / 16 | P20 | $0.28318 | $0.46718 | $0.14159 | $0.23359 |
+| xl | 8 / 32 | P10 | $0.40855 | $0.77655 | $0.20427 | $0.38827 |
+| xlp | 8 / 32 | P20 | $0.47518 | $0.84318 | $0.23759 | $0.42159 |
+
+*Small is a conditional estimate for `Standard_F1als_v7`, not a qualified capability. It requires a Gen2/NVMe-compatible image and regional/subscription availability. Windows Server can meet a 2-GiB OS minimum, but Visual Studio Build Tools requires at least 4 GiB; a lightweight job may qualify without Build Tools. RAM, free disk, and job-specific requirements must be measured. A standard Windows marketplace OS image is about 127 GiB, so it can fit P10's 128 GiB; the actual custom image and free workspace must be checked. Do not select a large-disk image and quote P10 pricing.
+
+Compute-only Linux/Windows rates are F1als_v7 $0.0605/$0.107, D2s_v5 $0.096/$0.188, D4s_v5 $0.192/$0.376, D8s_v5 $0.384/$0.752 per hour. P10 is $17.92/month; P20 $66.56/month. The 30-minute column is 30 minutes of resource lifetime, **not** a 30-minute job plus free startup/cleanup. Add boot, provisioning, and cleanup time; disks bill until deletion. Public IPv4 adds $0.005/hour ($0.0025/30 minutes).
+
+The one shared controller, ACR, retained images, Key Vault operations, logs, egress, image builds, and taxes are separate. Windows adds no controller per profile, but its retained image is additional storage. ACR Basic already costs about $0.1666/day; the controller's 0.25-vCPU/0.5-GiB allocation is about $0.0081/hour idle or $0.027/hour active before shared grants. These are not zero even with no runner VMs.
+
+Sources: [Azure Retail Prices API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices), queried with `armRegionName eq 'eastus2'`, `priceType eq 'Consumption'`, USD and exact `armSkuName`/product (excluding Spot/Low Priority); [Windows licensing](https://www.microsoft.com/licensing/faqs/1); [Azure image size](https://learn.microsoft.com/en-us/azure/virtual-machines/ephemeral-os-disks#size-requirements); [Falsv7 specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/compute-optimized/falsv7-series); [Windows Server requirements](https://learn.microsoft.com/en-us/windows-server/get-started/hardware-requirements); [Visual Studio Build Tools requirements](https://learn.microsoft.com/en-us/visualstudio/releases/2026/vs-system-requirements).

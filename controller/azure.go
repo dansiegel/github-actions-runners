@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,6 +68,9 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 	if err != nil {
 		return RunnerVM{}, err
 	}
+	// Validate and render before creating any billable network resources.
+	osProfile, err := renderOSProfile(m.config, runnerName, encodedJITConfig)
+	if err != nil { return RunnerVM{}, err }
 	vmName := azureResourceName(runnerName)
 	createdAt := time.Now().UTC()
 	tags := map[string]string{
@@ -141,22 +143,7 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		"hardwareProfile": map[string]any{
 			"vmSize": m.config.VMSize,
 		},
-		"osProfile": map[string]any{
-			"computerName":  takeString(vmName, 63),
-			"adminUsername": m.config.VMAdminUser,
-			"customData":    base64.StdEncoding.EncodeToString([]byte(renderCloudInit(m.config, encodedJITConfig))),
-			"linuxConfiguration": map[string]any{
-				"disablePasswordAuthentication": true,
-				"ssh": map[string]any{
-					"publicKeys": []any{
-						map[string]any{
-							"path":    fmt.Sprintf("/home/%s/.ssh/authorized_keys", m.config.VMAdminUser),
-							"keyData": m.config.VMSSHPublicKey,
-						},
-					},
-				},
-			},
-		},
+		"osProfile": osProfile,
 		"storageProfile": map[string]any{
 			"imageReference": imageReference,
 			"osDisk": map[string]any{
@@ -190,11 +177,8 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		vmProperties["billingProfile"] = map[string]any{"maxPrice": -1}
 	}
 
-	if err := m.put(ctx, m.vmID(vmName), computeAPIVersion, map[string]any{
-		"location":   m.config.Location,
-		"tags":       tags,
-		"properties": vmProperties,
-	}); err != nil {
+	vmBody := map[string]any{"location": m.config.Location, "tags": tags, "properties": vmProperties}
+	if err := m.createRunnerVM(ctx, vmName, vmBody); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cleanupCancel()
 		if isOperationPreempted(err) && m.vmExists(cleanupCtx, vmName) {
@@ -213,6 +197,10 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 func (m *AzureVMManager) Delete(ctx context.Context, vmName string) error {
 	vmName = azureResourceName(vmName)
 	var result error
+	if m.config.OSType == "Windows" {
+		// Cancel any in-flight template before deleting its VM or NIC.
+		if err := m.finishWindowsDeployment(ctx, vmName, true); err != nil { return err }
+	}
 	if err := m.delete(ctx, m.vmID(vmName), computeAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
 		return fmt.Errorf("deleting VM %s: %w", vmName, err)
 	}

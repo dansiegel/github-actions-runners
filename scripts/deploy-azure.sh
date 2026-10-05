@@ -73,7 +73,7 @@ if [[ -n "$RUNNER_POOLS_FILE" ]]; then
     if type != "array" or length < 1 then error("configuration must contain at least one pool") else . end
     | map(
         if type != "object" then error("each pool must be an object") else . end
-        | if (keys - ["name", "vmSize", "maxRunners", "priority", "labels", "osDiskTier", "enabled", "imageId"] | length) != 0 then error("unknown pool configuration field") else . end
+        | if (keys - ["name", "vmSize", "maxRunners", "priority", "labels", "osDiskTier", "enabled", "imageId", "osType", "windowsAdminSecret"] | length) != 0 then error("unknown pool configuration field") else . end
         | if (.name | type) != "string" or (.name | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") | not) then error("invalid pool name") else . end
         | if (.vmSize | type) != "string" or (.vmSize | test("^Standard_[A-Za-z0-9_]+$") | not) then error("invalid VM size for " + .name) else . end
         | if has("maxRunners") then
@@ -84,6 +84,15 @@ if [[ -n "$RUNNER_POOLS_FILE" ]]; then
             if (.imageId | type) != "string" then error("imageId must be a string for " + .name)
             else .imageId |= gsub("^\\s+|\\s+$"; "") end
           else . end
+        | if has("osType") and (.osType != "Linux" and .osType != "Windows") then error("osType must be Linux or Windows for " + .name) else . end
+        | if .osType == "Windows" and .enabled != false and (.imageId // "") == "" then error("enabled Windows profiles require an explicit qualified imageId for " + .name) else . end
+        | if has("windowsAdminSecret") then
+            if .osType != "Windows" or (.windowsAdminSecret | type) != "object" then error("windowsAdminSecret is a Windows-only Key Vault reference")
+            elif (.windowsAdminSecret | keys) != ["keyVaultId", "secretName", "secretVersion"] then error("windowsAdminSecret requires exactly keyVaultId, secretName, secretVersion")
+            elif (.windowsAdminSecret.keyVaultId | type) != "string" or (.windowsAdminSecret.secretName | type) != "string" or (.windowsAdminSecret.secretVersion | type) != "string" then error("Windows secret references must be strings")
+            elif (.windowsAdminSecret.keyVaultId | test("^/subscriptions/[A-Za-z0-9-]+/resourceGroups/[A-Za-z0-9._()-]+/providers/Microsoft.KeyVault/vaults/[A-Za-z0-9-]+$") | not) or (.windowsAdminSecret.secretName | test("^[A-Za-z0-9-]{1,127}$") | not) or (.windowsAdminSecret.secretVersion | test("^[a-fA-F0-9]{32}$") | not) then error("invalid Windows Key Vault secret reference")
+            else . end
+          elif .osType == "Windows" and .enabled != false then error("enabled Windows profiles require windowsAdminSecret") else . end
         | .priority = (.priority // "Regular")
         | if (.priority != "Regular" and .priority != "Spot") then error("priority must be Regular or Spot for " + .name) else . end
         | .osDiskTier = (if .osDiskTier == null then "" else .osDiskTier end)
@@ -131,8 +140,9 @@ echo "Location:            $LOCATION"
 echo "Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)"
 echo "Runner pools:"
 jq -r '.[] | "  \(.name): \(if .enabled == false then "disabled" elif (.maxRunners // 0) == 0 then "0..demand (uncapped)" else "0..\(.maxRunners)" end) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
-jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then "shared RUNNER_IMAGE_ID" else "pool imageId override" end)"' <<<"$RUNNER_POOLS_JSON"
-echo "Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
+jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then (if .osType == "Windows" then "unqualified Windows image (disabled)" else "shared RUNNER_IMAGE_ID" end) else "pool imageId override" end)"' <<<"$RUNNER_POOLS_JSON"
+echo "Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
+echo "Windows profiles:    explicit qualified imageId required; image build is separate"
 
 if [[ "$MODE" != "apply" ]]; then
   echo "Dry run only. No Azure resources were changed."
