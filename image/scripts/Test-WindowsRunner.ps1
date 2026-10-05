@@ -53,8 +53,8 @@ function Test-WindowsBuildRemoting {
         $calls.Add('temporary-admin-token')
     }
     function New-SelfSignedCertificate {
-        param($DnsName, $CertStoreLocation, $FriendlyName, $KeyExportPolicy, $NotAfter)
-        if ($KeyExportPolicy -ne 'NonExportable' -or $CertStoreLocation -ne 'Cert:\LocalMachine\My' -or $FriendlyName -ne 'GitHubRunnerPackerWinRM') { throw 'TLS private key can escape the build VM' }
+        param($DnsName, $CertStoreLocation, $FriendlyName, $Provider, $KeyAlgorithm, $KeySpec, $KeyExportPolicy, $NotAfter)
+        if ($KeyExportPolicy -ne 'NonExportable' -or $CertStoreLocation -ne 'Cert:\LocalMachine\My' -or $FriendlyName -ne 'GitHubRunnerPackerWinRM' -or $Provider -cne 'Microsoft Software Key Storage Provider' -or $KeyAlgorithm -cne 'RSA' -or $KeySpec -cne 'None') { throw 'Unexpected TLS key provider or export policy' }
         if ($NotAfter -gt (Get-Date).AddHours(4) -or $NotAfter -lt (Get-Date).AddHours(3.9)) { throw 'Unexpected certificate lifetime' }
         $calls.Add('guest-local-key')
         return [pscustomobject]@{ Thumbprint = 'new-build-key' }
@@ -162,6 +162,83 @@ function Test-WindowsImageAccountCleanup {
     Write-Output 'Windows image account SID classification, retirement, Server Sysprep gate, and failure readback tests passed.'
 }
 Test-WindowsImageAccountCleanup
+
+function Test-WindowsImageCertificateCleanup {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $state = @{ provider = $true; file = $true; certificate = $true; scenario = ''; calls = [Collections.Generic.List[string]]::new() }
+    function Test-WindowsBuildCngKey {
+        param($Identity)
+        if ($state.scenario -eq 'provider-access-denied') { throw [UnauthorizedAccessException]::new('simulated provider denial') }
+        return $state.provider
+    }
+    function Get-ChildItem {
+        [CmdletBinding()] param($Path, $LiteralPath, [switch] $Force)
+        if ($LiteralPath) {
+            if ($LiteralPath -ne "$env:ProgramData\Microsoft\Crypto\Keys") { throw 'Unexpected key directory' }
+            if ($state.scenario -eq 'directory-access-denied') { throw [UnauthorizedAccessException]::new('simulated directory denial') }
+            if ($state.file) {
+                [pscustomobject]@{
+                    Name = $(if ($state.scenario -eq 'case-variant') { 'OWNED-KEY-FILE' } else { 'owned-key-file' })
+                    PSIsContainer = $state.scenario -eq 'directory-entry'
+                    Attributes = $(if ($state.scenario -eq 'reparse-entry') { [IO.FileAttributes]::ReparsePoint } else { [IO.FileAttributes]::Normal })
+                }
+            }
+            [pscustomobject]@{ Name = 'unrelated-key-file'; PSIsContainer = $false; Attributes = [IO.FileAttributes]::Normal }
+        } elseif ($Path -eq 'Cert:\LocalMachine\My') {
+            if ($state.certificate) { [pscustomobject]@{ Thumbprint = ('A' * 40); FriendlyName = 'GitHubRunnerPackerWinRM'; HasPrivateKey = $false } }
+            [pscustomobject]@{ Thumbprint = ('B' * 40); FriendlyName = 'UnrelatedCertificate'; HasPrivateKey = $true }
+        } else { throw 'Unexpected certificate path' }
+    }
+    function Remove-Item {
+        [CmdletBinding()] param($Path, $LiteralPath, [switch] $Force)
+        if ($LiteralPath -eq "$env:ProgramData\Microsoft\Crypto\Keys\owned-key-file") {
+            $state.calls.Add('file-delete')
+            if ($state.scenario -eq 'file-delete-denied') { throw [UnauthorizedAccessException]::new('simulated file deletion denial') }
+            if ($state.scenario -ne 'file-delete-no-op') { $state.file = $false }
+        } elseif ($Path -eq ('Cert:\LocalMachine\My\' + ('A' * 40))) {
+            if ($state.provider -or $state.file) { throw 'Certificate was removed before private-key absence was proved' }
+            $state.calls.Add('certificate-delete')
+            if ($state.scenario -ne 'certificate-delete-no-op') { $state.certificate = $false }
+        } else { throw 'Cleanup targeted an unrelated key or certificate' }
+    }
+    $key = [pscustomobject]@{ state = $state }
+    $key | Add-Member ScriptMethod Delete {
+        $this.state.calls.Add('provider-delete')
+        if ($this.state.scenario -eq 'provider-delete-error') { throw [Security.Cryptography.CryptographicException]::new('simulated missing keyset') }
+        if ($this.state.scenario -ne 'provider-delete-no-op') { $this.state.provider = $false; $this.state.file = $false }
+    }
+    $rsa = [pscustomobject]@{ state = $state }
+    $rsa | Add-Member ScriptMethod Dispose { $this.state.calls.Add('handle-dispose') }
+    $identity = [pscustomobject]@{ thumbprint = ('A' * 40); provider = 'Microsoft Software Key Storage Provider'; machineKey = $true; keyName = 'owned-key'; uniqueName = 'owned-key-file'; key = $key; rsa = $rsa }
+    foreach ($scenario in @('normal', 'already-absent', 'provider-only', 'orphan-file', 'missing-certificate', 'case-variant')) {
+        $state.scenario = $scenario; $state.calls.Clear(); $state.provider = $scenario -in @('normal', 'provider-only'); $state.file = $scenario -notin @('already-absent', 'provider-only'); $state.certificate = $scenario -ne 'missing-certificate'
+        $result = Remove-WindowsImageBuildCertificate -Identity $identity
+        if (-not $result.privateKeyAbsent -or -not $result.certificateAbsent -or $state.provider -or $state.file -or $state.certificate) { throw "Unproven key cleanup: $scenario" }
+        if ($scenario -eq 'already-absent' -and ($state.calls.Contains('provider-delete') -or $state.calls.Contains('file-delete'))) { throw 'Already-absent key was not verified read-only' }
+        if ($scenario -eq 'provider-only' -and -not $state.calls.Contains('provider-delete')) { throw 'A missing file hid a provider-accessible key' }
+        if ($scenario -in @('orphan-file', 'missing-certificate', 'case-variant') -and -not $state.calls.Contains('file-delete')) { throw 'Certificate metadata hid a remaining private-key file' }
+    }
+    foreach ($scenario in @('provider-access-denied', 'directory-access-denied', 'provider-delete-error', 'provider-delete-no-op', 'file-delete-denied', 'file-delete-no-op', 'certificate-delete-no-op', 'directory-entry', 'reparse-entry')) {
+        $state.scenario = $scenario; $state.calls.Clear(); $state.provider = $scenario -notin @('file-delete-denied', 'file-delete-no-op'); $state.file = $true; $state.certificate = $true
+        $rejected = $false
+        try { Remove-WindowsImageBuildCertificate -Identity $identity | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw "Key cleanup ignored an error or failed readback: $scenario" }
+    }
+    foreach ($field in @('provider', 'machineKey', 'uniqueName', 'thumbprint')) {
+        $bad = [pscustomobject]@{ thumbprint = $identity.thumbprint; provider = $identity.provider; machineKey = $true; keyName = $identity.keyName; uniqueName = $identity.uniqueName; key = $key; rsa = $rsa }
+        switch ($field) {
+            'provider' { $bad.provider = 'Foreign Provider' }
+            'machineKey' { $bad.machineKey = $false }
+            'uniqueName' { $bad.uniqueName = '..\unrelated-key-file' }
+            'thumbprint' { $bad.thumbprint = '*' }
+        }
+        $state.calls.Clear(); $rejected = $false
+        try { Remove-WindowsImageBuildCertificate -Identity $bad | Out-Null } catch { $rejected = $true }
+        if (-not $rejected -or $state.calls.Count) { throw "Invalid key identity reached deletion: $field" }
+    }
+    Write-Output 'Windows build certificate ownership, exact key-file cleanup, absence proof, and access/error readback tests passed.'
+}
+Test-WindowsImageCertificateCleanup
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $testRoot | Out-Null

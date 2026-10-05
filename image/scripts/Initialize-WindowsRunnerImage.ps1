@@ -34,7 +34,7 @@ function Initialize-WindowsBuildRemoting {
         # pipeline input is processed, regardless of the current filesystem path.
         Remove-Item -Path "Cert:\LocalMachine\My\$($oldCertificate.Thumbprint)" -DeleteKey -Force
     }
-    $certificate = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My -FriendlyName 'GitHubRunnerPackerWinRM' -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddHours(4)
+    $certificate = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My -FriendlyName 'GitHubRunnerPackerWinRM' -Provider 'Microsoft Software Key Storage Provider' -KeyAlgorithm RSA -KeySpec None -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddHours(4)
     New-Item WSMan:\localhost\Listener -Transport HTTPS -Address '*' -CertificateThumbPrint $certificate.Thumbprint -Force | Out-Null
     Get-NetFirewallRule -Name 'WINRM-Packer-Build' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -Name 'WINRM-Packer-Build' -DisplayName 'Packer build WinRM HTTPS' -Enabled True -Profile Any -Action Allow -Direction Inbound -LocalPort 5986 -Protocol TCP -RemoteAddress $SourceCidr | Out-Null
