@@ -12,7 +12,7 @@ func TestWindowsProfilesRequireExplicitImage(t *testing.T) {
     c := validConfig()
     c.ImageID = "/images/linux"
     c.WindowsRunnerSHA256 = defaultWindowsRunnerSHA256
-    c.Pools = []RunnerPool{{Name:"linux", VMSize:"Standard_D4s_v5"}, {Name:"windows", VMSize:"Standard_D4s_v5", OSType:"Windows"}}
+    c.Pools = []RunnerPool{{Name:"linux-profile", VMSize:"Standard_D4s_v5"}, {Name:"windows-profile", VMSize:"Standard_D4s_v5", OSType:"Windows"}}
     if c.Validate() == nil { t.Fatal("Windows inherited Linux image") }
     c.Pools[1].ImageID = "/images/windows"
     pools, err := c.PoolConfigs()
