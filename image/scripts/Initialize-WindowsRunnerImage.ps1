@@ -29,7 +29,11 @@ function Initialize-WindowsBuildRemoting {
     # The final image step resets this setting before capture.
     New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 1 -Force | Out-Null
 
-    Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' } | Remove-Item -DeleteKey -Force
+    foreach ($oldCertificate in Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' }) {
+        # DeleteKey is a dynamic parameter: bind the Certificate provider before
+        # pipeline input is processed, regardless of the current filesystem path.
+        Remove-Item -Path "Cert:\LocalMachine\My\$($oldCertificate.Thumbprint)" -DeleteKey -Force
+    }
     $certificate = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My -FriendlyName 'GitHubRunnerPackerWinRM' -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddHours(4)
     New-Item WSMan:\localhost\Listener -Transport HTTPS -Address '*' -CertificateThumbPrint $certificate.Thumbprint -Force | Out-Null
     Get-NetFirewallRule -Name 'WINRM-Packer-Build' -ErrorAction SilentlyContinue | Remove-NetFirewallRule

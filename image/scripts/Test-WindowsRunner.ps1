@@ -10,24 +10,37 @@ if ($buildEncoded.Length + 1024 -ge 8191) { throw 'Build bootstrap exceeds the W
 $packerTemplate = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../windows-runner.pkr.hcl') -Raw
 if ($packerTemplate -notmatch 'skip_create_build_key_vault\s*=\s*true' -or $packerTemplate -notmatch 'winrm_use_ntlm\s*=\s*true' -or $packerTemplate -match '(?m)^\s*(winrm_password|user_data|user_data_file|build_key_vault_name)\s*=') { throw 'Build template reintroduced a vault or credential-bearing bootstrap input' }
 
+# Inspect the real provider's command metadata without creating or deleting a
+# certificate. Pipeline input cannot select DeleteKey during parameter binding.
+$certificateDeleteKey = (Get-Command Microsoft.PowerShell.Management\Remove-Item -ArgumentList 'Cert:\LocalMachine\My').Parameters.ContainsKey('DeleteKey')
+$filesystemDeleteKey = (Get-Command Microsoft.PowerShell.Management\Remove-Item -ArgumentList $PSScriptRoot).Parameters.ContainsKey('DeleteKey')
+if (-not $certificateDeleteKey -or $filesystemDeleteKey) { throw 'Unexpected Certificate provider dynamic-parameter binding' }
+
 # Keep remoting tests in their own scope: these mocks never change host services,
 # certificates, firewall rules, or registry settings on the hosted CI runner.
 function Test-WindowsBuildRemoting {
     . (Join-Path $PSScriptRoot 'Initialize-WindowsRunnerImage.ps1')
     $calls = [Collections.Generic.List[string]]::new()
     $settings = @{}
+    $certificateState = @{ hasOldCertificate = $false }
     function Set-Service { param($Name, $StartupType) $calls.Add('service') }
     function Start-Service { param($Name) $calls.Add('start') }
     function Get-ChildItem {
         param($Path)
         if ($Path -like 'WSMan:*') { return 'old-listener' }
-        if ($Path -like 'Cert:*') { return [pscustomobject]@{ FriendlyName = 'GitHubRunnerPackerWinRM'; Thumbprint = 'old-build-key' } }
+        if ($Path -like 'Cert:*') {
+            if ($certificateState.hasOldCertificate) { return [pscustomobject]@{ FriendlyName = 'GitHubRunnerPackerWinRM'; Thumbprint = 'old-build-key' } }
+            return
+        }
         throw "Unexpected remoting path: $Path"
     }
     function Remove-Item {
-        param([Parameter(ValueFromPipeline)] $InputObject, [switch] $Recurse, [switch] $Force, [switch] $DeleteKey)
+        param([Parameter(Position=0)][string] $Path, [Parameter(ValueFromPipeline)] $InputObject, [switch] $Recurse, [switch] $Force, [switch] $DeleteKey)
         process {
-            if ($DeleteKey) { $calls.Add('delete-old-key') } else { $calls.Add('delete-old-listener') }
+            if ($DeleteKey) {
+                if ($Path -cne 'Cert:\LocalMachine\My\old-build-key') { throw 'DeleteKey requires an explicit Certificate provider path' }
+                $calls.Add('delete-old-key')
+            } else { $calls.Add('delete-old-listener') }
         }
     }
     function Get-NetFirewallRule { [CmdletBinding()] param($Name) return $Name }
@@ -61,6 +74,10 @@ function Test-WindowsBuildRemoting {
         try { Initialize-WindowsBuildRemoting -SourceCidr $bad } catch { $rejected = $true }
         if (-not $rejected -or $calls.Count) { throw 'Invalid build source changed remoting state' }
     }
+    Initialize-WindowsBuildRemoting -SourceCidr '203.0.113.10/32'
+    if ($calls.Contains('delete-old-key') -or -not $calls.Contains('scoped-firewall')) { throw 'Initial setup failed with an empty certificate store' }
+    $calls.Clear()
+    $certificateState.hasOldCertificate = $true
     1..2 | ForEach-Object { Initialize-WindowsBuildRemoting -SourceCidr '203.0.113.10/32' }
     if ($settings['WSMan:\localhost\Service\AllowUnencrypted'] -ne $false -or $settings['WSMan:\localhost\Service\Auth\Basic'] -ne $false -or $settings['WSMan:\localhost\Service\Auth\Negotiate'] -ne $true) { throw 'Insecure WinRM authentication policy' }
     foreach ($required in @('delete-old-listener', 'delete-old-key', 'disable:WINRM*', 'remove:WINRM-Packer-Build', 'guest-local-key', 'https-listener', 'scoped-firewall')) {
