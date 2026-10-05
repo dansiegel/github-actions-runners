@@ -101,3 +101,17 @@ func TestWindowsUncertainPutPollsWithoutRegeneratingCredential(t *testing.T) {
     if _,err:=manager.Create(context.Background(),"windows-unique","jit");err!=nil{t.Fatal(err)}
     if puts!=1{t.Fatalf("deployment PUT occurred %d times; credential default can be reevaluated",puts)}
 }
+
+func TestMissingWindowsDeploymentAccessCreatesNoBillableResources(t *testing.T) {
+    mutations := 0
+    server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+        if r.Method != http.MethodGet { mutations++ }
+        w.WriteHeader(http.StatusForbidden)
+        _,_=io.WriteString(w,`{"error":{"code":"AuthorizationFailed"}}`)
+    }))
+    defer server.Close()
+    c:=validConfig();c.OSType="Windows";c.ImageID="/images/windows";c.ARMEndpoint=server.URL
+    manager:=&AzureVMManager{config:c,credential:fakeCredential{},httpClient:server.Client(),logger:slog.New(slog.NewTextHandler(io.Discard,nil))}
+    if _,err:=manager.Create(context.Background(),"windows-test","jit");err==nil{t.Fatal("missing deployment access accepted")}
+    if mutations!=0{t.Fatal("missing Windows permission allocated billable resources")}
+}

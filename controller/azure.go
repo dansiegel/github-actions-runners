@@ -72,6 +72,13 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 	osProfile, err := renderOSProfile(m.config, runnerName, encodedJITConfig)
 	if err != nil { return RunnerVM{}, err }
 	vmName := azureResourceName(runnerName)
+	if m.config.OSType == "Windows" {
+		// Fail a missing deployment-read grant before allocating a NIC/IP that
+		// this controller could not safely clean up through the Windows path.
+		if _, err := m.get(ctx, m.deploymentID(vmName), deploymentAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
+			return RunnerVM{}, fmt.Errorf("checking Windows deployment access: %w", err)
+		}
+	}
 	createdAt := time.Now().UTC()
 	tags := map[string]string{
 		"managed-by":         "gha-runner-scale-controller",

@@ -34,7 +34,7 @@ Expand-Archive -LiteralPath $archive -DestinationPath $runnerRoot
 $git = Get-VerifiedDownload -Url 'https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/Git-2.56.0-64-bit.exe' -Name 'git.exe' -Hash 'bfe94e7b419b16eee9fecbd1253a98e3d4f49ba8f029630549052278ffe286a6'
 Install-CheckedProcess -Path $git -Arguments @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS')
 $pwsh = Get-VerifiedDownload -Url 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi' -Name 'powershell.msi' -Hash '958838ff55091e1c8705d89efed0cc7e8245a3a6ef6c0ccfae20015227108ad8'
-Install-CheckedProcess -Path 'msiexec.exe' -Arguments @('/i', $pwsh, '/qn', '/norestart', 'ENABLE_PSREMOTING=0', 'REGISTER_MANIFEST=0', 'USE_MU=0', 'ENABLE_MU=0')
+Install-CheckedProcess -Path 'msiexec.exe' -Arguments @('/i', $pwsh, '/qn', '/norestart', 'ADD_PATH=1', 'ENABLE_PSREMOTING=0', 'REGISTER_MANIFEST=0', 'USE_MU=0', 'ENABLE_MU=0')
 
 # Immutable vendor archive URLs and published checksums are reviewed together.
 $dotnetFile = @{
