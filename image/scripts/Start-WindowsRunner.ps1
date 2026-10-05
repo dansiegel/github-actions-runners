@@ -16,7 +16,7 @@ function Read-RunnerBootstrapData {
     $data = $text | ConvertFrom-Json
     $fields = @($data.PSObject.Properties.Name)
     if ($fields.Count -ne 4 -or @($fields | Where-Object { $_ -cnotin @('schemaVersion', 'runnerVersion', 'runnerSHA256', 'jitConfig') }).Count) { throw 'Invalid bootstrap fields' }
-    if ($data.schemaVersion -ne 1 -or $data.runnerVersion -isnot [string] -or $data.runnerVersion -cnotmatch '^\d+\.\d+\.\d+$' -or $data.runnerSHA256 -isnot [string] -or $data.runnerSHA256 -cnotmatch '^[a-f0-9]{64}$' -or $data.jitConfig -isnot [string]) { throw 'Invalid bootstrap schema' }
+    if (($data.schemaVersion -isnot [int] -and $data.schemaVersion -isnot [long]) -or $data.schemaVersion -ne 1 -or $data.runnerVersion -isnot [string] -or $data.runnerVersion -cnotmatch '^\d+\.\d+\.\d+$' -or $data.runnerSHA256 -isnot [string] -or $data.runnerSHA256 -cnotmatch '^[a-f0-9]{64}$' -or $data.jitConfig -isnot [string]) { throw 'Invalid bootstrap schema' }
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     if ($manifest.runnerVersion -cne $data.runnerVersion -or $manifest.runnerSHA256 -cne $data.runnerSHA256) { throw 'Image runner version/checksum does not match controller; rebuild and qualify the image' }
     $jit = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($data.jitConfig))
@@ -32,9 +32,9 @@ function Invoke-RunnerBootstrap {
         [scriptblock] $RunRunner = { param($root) Push-Location $root; try { & .\run.cmd | Out-Host; return $LASTEXITCODE } finally { Pop-Location } }
     )
     # FileMode.CreateNew is the durable one-shot guard, including after reboot.
-    $marker = [IO.File]::Open((Join-Path $StateRoot 'started'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    $marker.Dispose()
     try {
+        $marker = [IO.File]::Open((Join-Path $StateRoot 'started'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $marker.Dispose()
         $jit = Read-RunnerBootstrapData -Path $CustomDataPath -ManifestPath (Join-Path $StateRoot 'manifest.json')
         if (-not (Test-Path -LiteralPath (Join-Path $RunnerRoot 'run.cmd') -PathType Leaf)) { throw 'Baked runner is missing' }
         if (Test-Path -LiteralPath (Join-Path $RunnerRoot '.runner')) { throw 'Image contains an already configured runner' }
@@ -73,8 +73,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Do not log exception text: malformed payloads can contain JIT data.
         Write-Output 'Windows runner bootstrap failed; inspect image/version, payload availability, and runner diagnostics.'
     } finally {
-        @{ completedUtc = [DateTime]::UtcNow.ToString('o'); exitCode = $exitCode } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stateRoot 'result.json')
-        & shutdown.exe /s /t 0 /f
+        try {
+            @{ completedUtc = [DateTime]::UtcNow.ToString('o'); exitCode = $exitCode } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stateRoot 'result.json')
+        } finally { & shutdown.exe /s /t 0 /f }
     }
     exit $exitCode
 }

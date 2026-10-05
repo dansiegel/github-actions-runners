@@ -36,18 +36,15 @@ Install-CheckedProcess -Path $git -Arguments @('/VERYSILENT', '/NORESTART', '/NO
 $pwsh = Get-VerifiedDownload -Url 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi' -Name 'powershell.msi' -Hash '958838ff55091e1c8705d89efed0cc7e8245a3a6ef6c0ccfae20015227108ad8'
 Install-CheckedProcess -Path 'msiexec.exe' -Arguments @('/i', $pwsh, '/qn', '/norestart', 'ENABLE_PSREMOTING=0', 'REGISTER_MANIFEST=0', 'USE_MU=0', 'ENABLE_MU=0')
 
-# Versioned vendor metadata supplies the pinned SDK archive hash, never a
-# floating install script. The resolved file and hash are written to the image manifest.
-$metadata = Invoke-RestMethod -Uri 'https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json'
-$sdk = @($metadata.releases | ForEach-Object { $_.sdks } | Where-Object { $_.version -eq '10.0.401' })[0]
-$dotnetFile = @($sdk.files | Where-Object { $_.rid -eq 'win-x64' -and $_.url.EndsWith('.zip') })[0]
-if ($dotnetFile.url -notlike 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/*') { throw 'Unexpected SDK source' }
+# Immutable vendor archive URLs and published checksums are reviewed together.
+$dotnetFile = @{
+    url = 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-win-x64.zip'
+    hash = '24b670ad3d923bfcf47df6c3b034152398b42f6dbc388e10d783aee1cfb5e5817d399fc0ae2a12cfa822a55e61d34830ccb15c50ef6efee437ab874bb7c79430'
+}
 $dotnet = Get-VerifiedDownload -Url $dotnetFile.url -Name 'dotnet.zip' -Hash $dotnetFile.hash -Algorithm SHA512
 New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\dotnet" | Out-Null
 Expand-Archive -LiteralPath $dotnet -DestinationPath "$env:ProgramFiles\dotnet"
-$nodeChecksums = (Invoke-WebRequest -UseBasicParsing -Uri 'https://nodejs.org/dist/v24.21.0/SHASUMS256.txt').Content
-$nodeHash = [regex]::Match($nodeChecksums, '(?m)^([a-f0-9]{64})\s+node-v24\.21\.0-win-x64\.zip\s*$').Groups[1].Value
-if (-not $nodeHash) { throw 'Pinned Node archive checksum unavailable' }
+$nodeHash = '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541'
 $node = Get-VerifiedDownload -Url 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip' -Name 'node.zip' -Hash $nodeHash
 Expand-Archive -LiteralPath $node -DestinationPath $downloads
 Move-Item -LiteralPath (Join-Path $downloads 'node-v24.21.0-win-x64') -Destination "$env:ProgramFiles\nodejs"
