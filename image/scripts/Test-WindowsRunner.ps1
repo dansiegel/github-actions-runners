@@ -116,6 +116,11 @@ function Test-WindowsImageAccountCleanup {
     try { Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } catch { $rejected = $true }
     if (-not $rejected) { throw 'Capture accepted an active image administrator' }
     $state.users[$cleanup.sid].Enabled = $false
+    $state.users[$cleanup.sid].SID.Value = 'S-1-5-21-4-5-6-500'
+    $rejected = $false
+    try { Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Account readback accepted a different RID500 SID' }
+    $state.users[$cleanup.sid].SID.Value = $cleanup.sid
     $rejected = $false
     try { Assert-WindowsImageAccountCleanup -Cleanup $cleanup -GeneralizationState 'IMAGE_STATE_COMPLETE' } catch { $rejected = $true }
     if (-not $rejected) { throw 'Capture accepted incomplete Sysprep' }
@@ -202,6 +207,60 @@ function Test-WindowsFinalizationAttempt {
 Test-WindowsFinalizationAttempt
 
 
+
+function Test-WindowsBatchPolicyRestoration {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    # Compile P/Invoke declarations under the real .NET/PS5.1 toolchain only.
+    # Every actual policy read/removal below is mocked; no LSA handle is opened.
+    Initialize-WindowsBatchPolicyNative
+    $policyFixture = @{ allow = @('S-1-5-32-544'); deny = @('S-1-5-32-546'); removals = 0; scenario = '' }
+    $sid = 'S-1-5-21-1-2-3-500'; $attempt = '11111111-1111-1111-1111-111111111111'; $sha = 'a' * 64
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('runner-policy-test-' + [Guid]::NewGuid().ToString('N'))
+    function Get-WindowsBatchLogonPolicy {
+        if ($policyFixture.scenario -eq 'read-denied') { throw [UnauthorizedAccessException]::new('simulated policy read denial') }
+        return @{ SeBatchLogonRight = @($policyFixture.allow); SeDenyBatchLogonRight = @($policyFixture.deny) }
+    }
+    function Remove-WindowsTemporaryBatchLogonAssignment {
+        param($SID)
+        if ($SID -cne 'S-1-5-21-1-2-3-500') { throw 'Attempted to change another account' }
+        $policyFixture.removals++
+        if ($policyFixture.scenario -eq 'remove-denied') { throw [UnauthorizedAccessException]::new('simulated policy removal denial') }
+        if ($policyFixture.scenario -ne 'remove-no-op') { $policyFixture.allow = @($policyFixture.allow | Where-Object { $_ -cne $SID }) }
+    }
+    try {
+        foreach ($scenario in @('unchanged', 'own-added', 'original-direct', 'reordered', 'unrelated-added', 'original-removed', 'deny-changed', 'read-denied', 'remove-denied', 'remove-no-op', 'ordinary-original-deleted')) {
+            if (Test-Path $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+            New-Item -ItemType Directory -Path $root | Out-Null
+            $policyFixture.scenario = ''; $policyFixture.removals = 0; $policyFixture.allow = @('S-1-5-32-544'); $policyFixture.deny = @('S-1-5-32-546')
+            if ($scenario -in @('original-direct', 'ordinary-original-deleted')) { $policyFixture.allow += $sid }
+            Save-WindowsBatchLogonBaseline -Root $root -Attempt $attempt -SourceSHA256 $sha -SID $sid -Policy (Get-WindowsBatchLogonPolicy)
+            switch ($scenario) {
+                { $_ -in @('own-added', 'remove-denied', 'remove-no-op') } { $policyFixture.allow += $sid }
+                'reordered' { $policyFixture.allow = @($sid, 'S-1-5-32-544') }
+                'unrelated-added' { $policyFixture.allow += 'S-1-5-21-1-2-3-1002' }
+                'original-removed' { $policyFixture.allow = @() }
+                'deny-changed' { $policyFixture.deny = @() }
+                'ordinary-original-deleted' { $policyFixture.allow = @('S-1-5-32-544') }
+            }
+            if ($scenario -eq 'own-added') {
+                # Retry after successful-but-unacknowledged registration must
+                # retain the pre-registration baseline, not bless the added SID.
+                Save-WindowsBatchLogonBaseline -Root $root -Attempt $attempt -SourceSHA256 $sha -SID $sid -Policy (Get-WindowsBatchLogonPolicy)
+                if ($sid -in (Read-WindowsBatchLogonBaseline -Root $root -Attempt $attempt -SourceSHA256 $sha).allow) { throw 'Staging retry replaced the original policy baseline' }
+            }
+            $policyFixture.scenario = $scenario
+            $rejected = $false; $detail = ''
+            try { Restore-WindowsBatchLogonBaseline -Root $root -Attempt $attempt -SourceSHA256 $sha } catch { $rejected = $true; $detail = $_.Exception.Message }
+            $success = $scenario -in @('unchanged', 'own-added', 'original-direct', 'reordered')
+            if ($rejected -eq $success) { throw "Unexpected policy restoration result: $scenario; $detail" }
+            if ($scenario -in @('unchanged', 'original-direct', 'unrelated-added', 'original-removed', 'deny-changed', 'ordinary-original-deleted', 'read-denied') -and $policyFixture.removals) { throw 'Restoration changed an original or unrelated assignment' }
+            if ($scenario -in @('own-added', 'reordered') -and ($policyFixture.removals -ne 1 -or $sid -in $policyFixture.allow)) { throw 'Temporary own-SID assignment was not removed exactly once' }
+        }
+    } finally { if (Test-Path $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
+    Write-Output 'LSA declarations compile; baseline retry, direct-grant preservation, one-SID restoration, unrelated drift, and failure-readback tests passed.'
+}
+Test-WindowsBatchPolicyRestoration
+
 function Test-WindowsAdministratorFinalization {
     . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
     $fixture = @{ scenario = ''; sid = 'S-1-5-21-1-2-3-500'; sha = ('a' * 64); attempt = '11111111-1111-1111-1111-111111111111'; system = $false; elevated = $true; exists = $false; runs = 0; ran = $false; registrations = 0; now = [DateTime]::UtcNow }
@@ -213,6 +272,9 @@ function Test-WindowsAdministratorFinalization {
     function Get-WindowsFinalizationIdentity { return [pscustomobject]@{ IsSystem = $fixture.system; User = [pscustomobject]@{ Value = $(if ($fixture.scenario -eq 'wrong-user') { 'S-1-5-21-1-2-3-1001' } else { $fixture.sid }) }; Groups = @([pscustomobject]@{ Value = 'S-1-5-32-544' }) } }
     function Test-WindowsFinalizationElevation { return $fixture.elevated }
     function Get-WindowsImageBuildAccount { return [pscustomobject]@{ mode = 'BuiltinAdministrator'; sid = $fixture.sid } }
+    function Save-WindowsBatchLogonBaseline { param($Root, $Attempt, $SourceSHA256, $SID, $Policy) }
+    function Read-WindowsBatchLogonBaseline { param($Root, $Attempt, $SourceSHA256) return [pscustomobject]@{ sid = $fixture.sid; allow = @('S-1-5-32-544'); deny = @() } }
+    function Restore-WindowsBatchLogonBaseline { param($Root, $Attempt, $SourceSHA256) if ($fixture.scenario -eq 'policy-not-restored') { throw 'Policy readback failed' } }
     function Get-FileHash { param($LiteralPath, $Algorithm) return [pscustomobject]@{ Hash = $fixture.sha } }
     function Get-WindowsBatchLogonPolicy { return @{ SeBatchLogonRight = $(if ($fixture.scenario -eq 'missing-batch') { @() } else { @('S-1-5-32-544') }); SeDenyBatchLogonRight = $(if ($fixture.scenario -eq 'denied-batch') { @('S-1-5-32-544') } else { @() }) } }
     function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [pscustomobject]@{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel } }
@@ -220,7 +282,7 @@ function Test-WindowsAdministratorFinalization {
     function New-ScheduledTaskSettingsSet {
         param($ExecutionTimeLimit, $MultipleInstances)
         if ($ExecutionTimeLimit.TotalMinutes -ne 18 -or $MultipleInstances -ne 'IgnoreNew') { throw 'Unbounded or repeated administrator task' }
-        return [pscustomobject]@{ ExecutionTimeLimit = 'PT18M' }
+        return [pscustomobject]@{ ExecutionTimeLimit = 'PT18M'; MultipleInstances = 'IgnoreNew'; RestartCount = 0; AllowHardTerminate = $true }
     }
     function Register-ScheduledTask {
         [CmdletBinding()] param($TaskName, $Action, $Principal, $Settings)
@@ -247,31 +309,34 @@ function Test-WindowsAdministratorFinalization {
     function Assert-WindowsImageAccountCleanup { param($Cleanup, $GeneralizationState) if ($fixture.scenario -eq 'account-remains' -or $GeneralizationState -cne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') { throw 'Independent account/state readback failed' } }
     function Test-WindowsBuildCngKey { param($Identity) return $fixture.scenario -eq 'key-remains' }
     function Get-WindowsBuildKeyFile { param($Identity) if ($fixture.scenario -eq 'key-file-remains') { return 'file' } }
-    function Get-ChildItem { [CmdletBinding()] param($Path) if ($fixture.scenario -eq 'certificate-remains' -and $Path -like 'Cert:*') { [pscustomobject]@{ Thumbprint = ('B' * 40); FriendlyName = 'GitHubRunnerPackerWinRM' } } }
+    function Get-ChildItem { [CmdletBinding()] param($Path, $LiteralPath, [switch] $Force) if ($LiteralPath -and $fixture.scenario -eq 'source-remains') { [pscustomobject]@{ Name = 'Complete-WindowsRunnerImage.ps1' } }; if ($fixture.scenario -eq 'certificate-remains' -and $Path -like 'Cert:*') { [pscustomobject]@{ Thumbprint = ('B' * 40); FriendlyName = 'GitHubRunnerPackerWinRM' } } }
     function Get-NetFirewallRule { [CmdletBinding()] param() if ($fixture.scenario -eq 'firewall-remains') { [pscustomobject]@{ Name = 'WINRM-Packer-Build' } } }
     function Get-ItemProperty { [CmdletBinding()] param($Path) return [pscustomobject]@{ ImageState = $(if ($fixture.scenario -eq 'incomplete-sysprep') { 'IMAGE_STATE_COMPLETE' } else { 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' }); LocalAccountTokenFilterPolicy = $(if ($fixture.scenario -eq 'token-policy-remains') { 1 } else { 0 }) } }
     function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch] $Force) if ($LiteralPath -cne $source) { throw 'Observer deleted an unrelated file' } }
     try {
-        foreach ($scenario in @('normal', 'system', 'wrong-user', 'not-elevated', 'missing-batch', 'denied-batch')) {
+        foreach ($scenario in @('normal', 'unapproved', 'system', 'wrong-user', 'not-elevated', 'missing-batch', 'denied-batch')) {
             $fixture.scenario = $scenario; $fixture.system = $scenario -eq 'system'; $fixture.elevated = $scenario -ne 'not-elevated'; $fixture.exists = $false; $fixture.registrations = 0
             $rejected = $false
-            try { Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source | Out-Null } catch { $rejected = $true }
+            try { Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source -AllowTemporaryBatchLogonAssignment:($scenario -ne 'unapproved') | Out-Null } catch { $rejected = $true }
             if ($rejected -eq ($scenario -eq 'normal')) { throw "Unexpected administrator staging result: $scenario" }
             if ($scenario -ne 'normal' -and $fixture.registrations) { throw 'Invalid administrator context registered a task' }
             if ($scenario -eq 'normal') {
-                Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source | Out-Null
+                Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source -AllowTemporaryBatchLogonAssignment:($scenario -ne 'unapproved') | Out-Null
                 if ($fixture.registrations -ne 1 -or $fixture.runs) { throw 'Staging replay changed or launched the task' }
             }
         }
-        foreach ($scenario in @('normal', 'bad-principal', 'bad-action', 'unbounded', 'trigger', 'nonzero-task', 'unchanged-run', 'task-running', 'missing-completion', 'wrong-execution-sid', 'incomplete-sysprep', 'account-remains', 'key-remains', 'key-file-remains', 'certificate-remains', 'firewall-remains', 'token-policy-remains', 'delete-no-op')) {
+        foreach ($scenario in @('normal', 'bad-principal', 'bad-action', 'unbounded', 'restart', 'parallel', 'no-hard-terminate', 'trigger', 'nonzero-task', 'unchanged-run', 'task-running', 'missing-completion', 'wrong-execution-sid', 'incomplete-sysprep', 'account-remains', 'key-remains', 'key-file-remains', 'certificate-remains', 'firewall-remains', 'token-policy-remains', 'delete-no-op', 'source-remains', 'policy-not-restored')) {
             if (Test-Path -LiteralPath $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force }
             New-Item -ItemType Directory -Path $root | Out-Null
             $fixture.scenario = $scenario; $fixture.system = $true; $fixture.exists = $true; $fixture.runs = 0; $fixture.ran = $false; $fixture.now = [DateTime]::UtcNow
-            $fixture.task = [pscustomobject]@{ TaskName = $name; Principal = [pscustomobject]@{ UserId = $fixture.sid; LogonType = 'S4U'; RunLevel = 'Highest' }; Actions = @([pscustomobject]@{ Execute = $executable; Arguments = $arguments }); Settings = [pscustomobject]@{ ExecutionTimeLimit = 'PT18M' }; Triggers = $null; State = 'Ready' }
+            $fixture.task = [pscustomobject]@{ TaskName = $name; Principal = [pscustomobject]@{ UserId = $fixture.sid; LogonType = 'S4U'; RunLevel = 'Highest' }; Actions = @([pscustomobject]@{ Execute = $executable; Arguments = $arguments }); Settings = [pscustomobject]@{ ExecutionTimeLimit = 'PT18M'; MultipleInstances = 'IgnoreNew'; RestartCount = 0; AllowHardTerminate = $true }; Triggers = $null; State = 'Ready' }
             switch ($scenario) {
                 'bad-principal' { $fixture.task.Principal.UserId = 'S-1-5-18' }
                 'bad-action' { $fixture.task.Actions[0].Arguments = 'other' }
                 'unbounded' { $fixture.task.Settings.ExecutionTimeLimit = 'PT0S' }
+                'restart' { $fixture.task.Settings.RestartCount = 1 }
+                'parallel' { $fixture.task.Settings.MultipleInstances = 'Parallel' }
+                'no-hard-terminate' { $fixture.task.Settings.AllowHardTerminate = $false }
                 'trigger' { $fixture.task.Triggers = @('recurring') }
             }
             $completion = @{ attemptId = $fixture.attempt; scriptSHA256 = $fixture.sha; status = 'Succeeded'; accountCleanup = @{ mode = 'BuiltinAdministrator'; sid = $fixture.sid }; keyIdentity = @{ thumbprint = ('A' * 40) } }
@@ -281,7 +346,7 @@ function Test-WindowsAdministratorFinalization {
             try { $result = Wait-WindowsImageFinalizationTask -Root $root -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source } catch { $rejected = $true; $detail = $_.Exception.Message }
             if ($rejected -eq ($scenario -eq 'normal')) { throw "Unexpected task observer result: $scenario; $detail" }
             if ($scenario -eq 'normal' -and ($fixture.exists -or $fixture.runs -ne 1 -or -not $result.finalizationTaskAbsent -or -not (Test-Path (Join-Path $root 'image-finalization.observed.json')))) { throw 'Task success lacked independent removal proof' }
-            if ($scenario -in @('bad-principal', 'bad-action', 'unbounded', 'trigger') -and $fixture.runs) { throw 'Observer launched an untrusted task' }
+            if ($scenario -in @('bad-principal', 'bad-action', 'unbounded', 'restart', 'parallel', 'no-hard-terminate', 'trigger') -and $fixture.runs) { throw 'Observer launched an untrusted task' }
             if ($scenario -ne 'normal' -and (Test-Path (Join-Path $root 'image-finalization.observed.json'))) { throw 'Observer published success after failed readback' }
         }
     } finally { if (Test-Path -LiteralPath $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force } }
@@ -295,7 +360,7 @@ function Test-WindowsManagedFinalization {
     $attempt = '11111111-1111-1111-1111-111111111111'
     $sha = 'a' * 64
     $vmId = "/subscriptions/$subscription/resourceGroups/packer-fixture/providers/Microsoft.Compute/virtualMachines/pkrvmfixture"
-    $proof = @{ schemaVersion = 1; attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded'; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; buildAccountRetired = $true; privateKeyAbsent = $true; certificateAbsent = $true; winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true; finalizationTaskAbsent = $true }
+    $proof = @{ schemaVersion = 1; attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded'; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; buildAccountRetired = $true; privateKeyAbsent = $true; certificateAbsent = $true; winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true; finalizationTaskAbsent = $true; batchLogonPolicyRestored = $true }
     $testState = @{}
     function Get-WindowsFinalizationTime { return $testState.now }
     function Wait-WindowsFinalizationPoll { $testState.now = $testState.now.AddSeconds(60) }
@@ -373,7 +438,7 @@ function Test-WindowsManagedFinalization {
         if ($scenario -eq 'foreign-command' -and $testState.deletes) { throw 'Deleted an unrelated command' }
         if ($scenario -eq 'timeout' -and ($testState.deletes -ne 1 -or $testState.exists)) { throw 'Timed-out command was not cancelled and removed' }
     }
-    foreach ($scenario in @('nonzero', 'no-exit', 'running', 'bad-attempt', 'bad-sha', 'bad-sysprep', 'false-key', 'string-bool', 'missing-field', 'task-remains', 'empty-output', 'duplicate-proof')) {
+    foreach ($scenario in @('nonzero', 'no-exit', 'running', 'bad-attempt', 'bad-sha', 'bad-sysprep', 'false-key', 'string-bool', 'missing-field', 'task-remains', 'policy-remains', 'empty-output', 'duplicate-proof')) {
         $command = New-TestCommand
         $record = $proof | ConvertTo-Json | ConvertFrom-Json
         switch ($scenario) {
@@ -387,6 +452,7 @@ function Test-WindowsManagedFinalization {
             'string-bool' { $record.privateKeyAbsent = 'true' }
             'missing-field' { $record.PSObject.Properties.Remove('privateKeyAbsent') }
             'task-remains' { $record.finalizationTaskAbsent = $false }
+            'policy-remains' { $record.batchLogonPolicyRestored = $false }
         }
         $command.properties.instanceView.output = 'GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Compress)
         if ($scenario -eq 'empty-output') { $command.properties.instanceView.output = '' }

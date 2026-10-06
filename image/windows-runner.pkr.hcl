@@ -34,6 +34,14 @@ variable "base_image_version" {
   type    = string
   default = "26100.33438.260905"
 }
+variable "allow_temporary_batch_logon_assignment" {
+  type    = bool
+  default = false
+  validation {
+    condition     = var.allow_temporary_batch_logon_assignment
+    error_message = "Approve Task Scheduler's possible explicit batch-logon assignment for the existing build administrator and restoration of the exact baseline before opting in."
+  }
+}
 variable "runner_version" {
   type    = string
   default = "2.337.0"
@@ -109,7 +117,7 @@ build {
   }
   provisioner "powershell" {
     inline = [
-      "& 'C:\\Windows\\Temp\\Complete-WindowsRunnerImage.ps1' -RegisterTask -AttemptId '${build.PackerRunUUID}' -ExpectedScriptSHA256 '${sha256(file("${path.root}/scripts/Complete-WindowsRunnerImage.ps1"))}'"
+      "& 'C:\\Windows\\Temp\\Complete-WindowsRunnerImage.ps1' -RegisterTask -AllowTemporaryBatchLogonAssignment:${var.allow_temporary_batch_logon_assignment ? "$true" : "$false"} -AttemptId '${build.PackerRunUUID}' -ExpectedScriptSHA256 '${sha256(file("${path.root}/scripts/Complete-WindowsRunnerImage.ps1"))}'"
     ]
   }
   # Generalization retires WinRM itself. Observe completion through the existing

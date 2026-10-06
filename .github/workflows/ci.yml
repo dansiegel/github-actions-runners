@@ -77,6 +77,20 @@ jobs:
             exit 1
           fi
           [[ "$default_validation" == *"allow_unverified_winrm_certificate"* ]]
+          if batch_validation=$(docker run --rm \
+            -v "$PWD/image:/workspace" \
+            -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
+            -w /workspace hashicorp/packer:1.15.4 validate \
+            -var subscription_id=00000000-0000-0000-0000-000000000000 \
+            -var resource_group_name=gha-runners-validation \
+            -var managed_image_name=validation-only \
+            -var build_source_cidr=203.0.113.10/32 \
+            -var allow_unverified_winrm_certificate=true \
+            windows-runner.pkr.hcl 2>&1); then
+            echo "Windows build unexpectedly accepted batch-logon assignment without opt-in"
+            exit 1
+          fi
+          [[ "$batch_validation" == *"allow_temporary_batch_logon_assignment"* ]]
           docker run --rm \
             -v "$PWD/image:/workspace" \
             -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
@@ -86,6 +100,7 @@ jobs:
             -var managed_image_name=validation-only \
             -var build_source_cidr=203.0.113.10/32 \
             -var allow_unverified_winrm_certificate=true \
+            -var allow_temporary_batch_logon_assignment=true \
             windows-runner.pkr.hcl
 
       - name: Syntax-check scripts

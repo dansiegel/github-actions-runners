@@ -84,7 +84,7 @@ function Read-WindowsFinalizationProof {
     if ($lines.Count -ne 1) { throw 'Missing or ambiguous per-attempt finalization proof' }
     $proof = $lines[0].Substring('GHA_IMAGE_FINALIZATION '.Length) | ConvertFrom-Json
     if ($proof.schemaVersion -ne 1 -or $proof.attemptId -cne $ExpectedAttempt -or $proof.scriptSHA256 -cne $ExpectedSHA256 -or $proof.status -cne 'Succeeded' -or $proof.sysprepState -cne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') { throw 'Finalization proof does not match this build attempt and source' }
-    foreach ($field in @('buildAccountRetired', 'privateKeyAbsent', 'certificateAbsent', 'winrmListenersAbsent', 'buildFirewallRuleAbsent', 'tokenPolicyRestored', 'runtimeTaskPresent', 'finalizationTaskAbsent')) {
+    foreach ($field in @('buildAccountRetired', 'privateKeyAbsent', 'certificateAbsent', 'winrmListenersAbsent', 'buildFirewallRuleAbsent', 'tokenPolicyRestored', 'runtimeTaskPresent', 'finalizationTaskAbsent', 'batchLogonPolicyRestored')) {
         $value = Get-FinalizationProperty $proof $field
         if ($value -isnot [bool] -or -not $value) { throw "Finalization proof lacks verified $field" }
     }

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string] $AttemptId, [string] $ExpectedScriptSHA256, [switch] $RegisterTask)
+param([string] $AttemptId, [string] $ExpectedScriptSHA256, [switch] $RegisterTask, [switch] $AllowTemporaryBatchLogonAssignment)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -59,7 +59,7 @@ function Assert-WindowsImageAccountCleanup {
     if (@($users | Where-Object { $_.Name -ieq 'packer' }).Count) { throw 'Image still contains its build account name' }
     if ($Cleanup.mode -eq 'BuiltinAdministrator') {
         $administrator = @($users | Where-Object { $_.SID.Value -cmatch '^S-1-5-21-\d+-\d+-\d+-500$' })
-        if ($administrator.Count -ne 1 -or $administrator[0].Name -cne 'Administrator' -or $administrator[0].Enabled) { throw 'Generalized image administrator must remain disabled' }
+        if ($administrator.Count -ne 1 -or $administrator[0].Name -cne 'Administrator' -or $administrator[0].SID.Value -cne $Cleanup.sid -or $administrator[0].Enabled) { throw 'Generalized image administrator must remain disabled' }
         Write-Host "Image account readback: SID=$($administrator[0].SID.Value); name=$($administrator[0].Name); enabled=$($administrator[0].Enabled)"
     } elseif ($Cleanup.mode -eq 'RemovedLocalUser') {
         if (@($users | Where-Object { $_.SID.Value -eq $Cleanup.sid }).Count) { throw 'Deleted image build account remains' }
@@ -154,27 +154,32 @@ function Start-WindowsImageFinalizationAttempt {
 }
 
 function Register-WindowsImageFinalizationTask {
-    param([string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
+    param([string] $Attempt, [string] $SourceSHA256, [string] $SourcePath, [switch] $AllowTemporaryBatchLogonAssignment)
+    if (-not $AllowTemporaryBatchLogonAssignment) { throw 'Approve the possible temporary own-account batch-logon assignment before registering this task' }
     if ($Attempt -cnotmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' -or $SourceSHA256 -cnotmatch '^[a-f0-9]{64}$' -or $SourcePath -ine 'C:\Windows\Temp\Complete-WindowsRunnerImage.ps1') { throw 'Invalid finalization task identity' }
     if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $SourceSHA256) { throw 'Finalizer source changed after staging' }
     $identity = Get-WindowsFinalizationIdentity
     $account = Get-WindowsImageBuildAccount
     Assert-WindowsFinalizationAdministrator -ExpectedSID $account.sid
-    Assert-WindowsBatchLogonPolicy -Policy (Get-WindowsBatchLogonPolicy) -Identity $identity
+    $batchPolicy = Get-WindowsBatchLogonPolicy
+    Assert-WindowsBatchLogonPolicy -Policy $batchPolicy -Identity $identity
+    Save-WindowsBatchLogonBaseline -Root "$env:ProgramData\GitHubRunner" -Attempt $Attempt -SourceSHA256 $SourceSHA256 -SID $account.sid -Policy $batchPolicy
     $taskName = 'GitHubRunnerImageFinalize-' + $Attempt.Replace('-', '')
     $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $arguments = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
     $existing = @(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName)
     if (-not $existing.Count) {
         # Same-user S4U stores no password. Existing administrators have batch
-        # logon rights by default; never grant a missing right or change an ACL.
+        # logon rights by default; an explicitly approved redundant assignment
+        # is removed after the task. Never grant missing effective access.
         $principal = New-ScheduledTaskPrincipal -UserId $account.sid -LogonType S4U -RunLevel Highest
         $action = New-ScheduledTaskAction -Execute $executable -Argument $arguments
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMinutes(18)) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
     }
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if ($task.Principal.UserId -cne $account.sid -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $executable -or $task.Actions[0].Arguments -cne $arguments -or @($task.Triggers | Where-Object { $null -ne $_ }).Count) { throw 'Finalization task does not match the staged administrator action' }
+    if ($task.Principal.UserId -cne $account.sid -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $executable -or $task.Actions[0].Arguments -cne $arguments -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M' -or [string]$task.Settings.MultipleInstances -notin @('IgnoreNew', '2') -or $task.Settings.RestartCount -ne 0 -or -not $task.Settings.AllowHardTerminate) { throw 'Finalization task does not match the staged administrator action' }
+    Assert-WindowsBatchLogonDelta -Baseline (Read-WindowsBatchLogonBaseline -Root "$env:ProgramData\GitHubRunner" -Attempt $Attempt -SourceSHA256 $SourceSHA256) -Current (Get-WindowsBatchLogonPolicy)
     Write-Output "Staged independent administrator finalization task for attempt $Attempt; not started."
 }
 
@@ -202,31 +207,130 @@ function Complete-WindowsImageFinalizationAttempt {
 }
 
 
-function Get-WindowsBatchLogonPolicy {
-    $path = [IO.Path]::GetTempFileName()
-    try {
-        & "$env:SystemRoot\System32\secedit.exe" /export /cfg $path /areas USER_RIGHTS /quiet | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing batch-logon policy' }
-        $policy = @{}
-        foreach ($right in @('SeBatchLogonRight', 'SeDenyBatchLogonRight')) {
-            $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match ('^' + $right + '\s*=') })
-            if ($line.Count -gt 1) { throw 'Ambiguous batch-logon policy' }
-            $policy[$right] = @()
-            if ($line.Count -eq 1) {
-                $policy[$right] = @(($line[0] -split '=', 2)[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') } | Where-Object { $_ })
-            }
+function Initialize-WindowsBatchPolicyNative {
+    if ('RunnerImage.BatchPolicy' -as [type]) { return }
+    # Native declarations only. No policy handle is opened when tests compile
+    # this type; production exposes enumeration and one-right removal, no grant.
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+namespace RunnerImage {
+    public static class BatchPolicy {
+        [StructLayout(LayoutKind.Sequential)] struct Attributes {
+            public uint Length; public IntPtr RootDirectory; public IntPtr ObjectName;
+            public uint Flags; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService;
         }
-        return $policy
-    } finally { Remove-Item -LiteralPath $path -Force }
+        [StructLayout(LayoutKind.Sequential)] struct UnicodeString {
+            public ushort Length; public ushort MaximumLength; public IntPtr Buffer;
+        }
+        [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr system, ref Attributes attributes, uint access, out IntPtr handle);
+        [DllImport("advapi32.dll")] static extern uint LsaEnumerateAccountsWithUserRight(IntPtr handle, ref UnicodeString right, out IntPtr buffer, out uint count);
+        [DllImport("advapi32.dll")] static extern uint LsaRemoveAccountRights(IntPtr handle, IntPtr sid, [MarshalAs(UnmanagedType.U1)] bool allRights, [In] UnicodeString[] rights, uint count);
+        [DllImport("advapi32.dll")] static extern uint LsaNtStatusToWinError(uint status);
+        [DllImport("advapi32.dll")] static extern uint LsaFreeMemory(IntPtr buffer);
+        [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr handle);
+        static void Check(uint status) { if (status != 0) throw new Win32Exception((int)LsaNtStatusToWinError(status)); }
+        static IntPtr Open(uint access) {
+            var attributes = new Attributes(); attributes.Length = (uint)Marshal.SizeOf(typeof(Attributes));
+            IntPtr handle; Check(LsaOpenPolicy(IntPtr.Zero, ref attributes, access, out handle)); return handle;
+        }
+        static UnicodeString Right(string name) {
+            if (name != "SeBatchLogonRight" && name != "SeDenyBatchLogonRight") throw new ArgumentException("Unexpected policy right");
+            return new UnicodeString { Length = (ushort)(name.Length * 2), MaximumLength = (ushort)((name.Length + 1) * 2), Buffer = Marshal.StringToHGlobalUni(name) };
+        }
+        public static string[] Read(string name) {
+            IntPtr handle = IntPtr.Zero, buffer = IntPtr.Zero; var right = Right(name);
+            try {
+                handle = Open(0x00000801);
+                uint count; uint status = LsaEnumerateAccountsWithUserRight(handle, ref right, out buffer, out count);
+                if (status == 0x8000001A) return new string[0]; // STATUS_NO_MORE_ENTRIES
+                Check(status); var result = new string[count];
+                for (int i = 0; i < count; i++) result[i] = new SecurityIdentifier(Marshal.ReadIntPtr(buffer, i * IntPtr.Size)).Value;
+                return result;
+            } finally { if (buffer != IntPtr.Zero) LsaFreeMemory(buffer); Marshal.FreeHGlobal(right.Buffer); if (handle != IntPtr.Zero) LsaClose(handle); }
+        }
+        public static void RemoveTemporaryBatchGrant(string value) {
+            var sid = new SecurityIdentifier(value); var bytes = new byte[sid.BinaryLength]; sid.GetBinaryForm(bytes, 0);
+            IntPtr handle = IntPtr.Zero, nativeSid = Marshal.AllocHGlobal(bytes.Length); var right = Right("SeBatchLogonRight");
+            try {
+                handle = Open(0x00000800);
+                Marshal.Copy(bytes, 0, nativeSid, bytes.Length);
+                Check(LsaRemoveAccountRights(handle, nativeSid, false, new[] { right }, 1));
+            } finally { Marshal.FreeHGlobal(nativeSid); Marshal.FreeHGlobal(right.Buffer); if (handle != IntPtr.Zero) LsaClose(handle); }
+        }
+    }
+}
+'@
+}
+
+function Get-WindowsBatchLogonPolicy {
+    Initialize-WindowsBatchPolicyNative
+    return @{ SeBatchLogonRight = @([RunnerImage.BatchPolicy]::Read('SeBatchLogonRight')); SeDenyBatchLogonRight = @([RunnerImage.BatchPolicy]::Read('SeDenyBatchLogonRight')) }
 }
 
 function Assert-WindowsBatchLogonPolicy {
     param($Policy, $Identity)
+    foreach ($entry in @($Policy.SeBatchLogonRight) + @($Policy.SeDenyBatchLogonRight)) {
+        if ($entry -cnotmatch '^S-1-\d+(-\d+)+$') { throw 'Cannot resolve a batch-logon policy entry to a verified SID' }
+    }
     $identities = @($Identity.User.Value) + @($Identity.Groups | ForEach-Object { $_.Value })
     if (@($Policy.SeDenyBatchLogonRight | Where-Object { $_ -in $identities }).Count) { throw 'Existing policy denies batch logon for the build administrator' }
     # The caller has already proved its elevated Administrators token. Fail on
     # unfamiliar name-based assignments instead of modifying local policy.
     if (-not @($Policy.SeBatchLogonRight | Where-Object { $_ -in @($Identity.User.Value, 'S-1-5-32-544') }).Count) { throw 'Existing build administrator lacks batch-logon permission' }
+}
+
+function Read-WindowsBatchLogonBaseline {
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256)
+    $baseline = Get-Content -LiteralPath (Join-Path $Root 'image-finalization.batch-policy.json') -Raw | ConvertFrom-Json
+    if ($baseline.attemptId -cne $Attempt -or $baseline.scriptSHA256 -cne $SourceSHA256 -or $baseline.sid -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$') { throw 'Batch-logon baseline belongs to another attempt' }
+    return $baseline
+}
+
+function Assert-WindowsBatchLogonDelta {
+    param($Baseline, $Current)
+    $beforeAllow = @($Baseline.allow | Sort-Object -Unique)
+    $afterAllow = @($Current.SeBatchLogonRight | Sort-Object -Unique)
+    if (@($beforeAllow | Where-Object { $_ -notin $afterAllow }).Count -or @($afterAllow | Where-Object { $_ -notin $beforeAllow -and $_ -cne $Baseline.sid }).Count -or
+        ((@($Baseline.deny | Sort-Object -Unique) -join ',') -cne (@($Current.SeDenyBatchLogonRight | Sort-Object -Unique) -join ','))) { throw 'Unexpected batch-logon policy change; refusing broad restoration' }
+}
+
+function Save-WindowsBatchLogonBaseline {
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SID, $Policy)
+    $path = Join-Path $Root 'image-finalization.batch-policy.json'
+    if (Test-Path -LiteralPath $path) {
+        $baseline = Read-WindowsBatchLogonBaseline -Root $Root -Attempt $Attempt -SourceSHA256 $SourceSHA256
+        if ($baseline.sid -cne $SID) { throw 'Batch-logon baseline account changed' }
+        Assert-WindowsBatchLogonDelta -Baseline $baseline -Current $Policy
+        return
+    }
+    $baseline = @{ attemptId = $Attempt; scriptSHA256 = $SourceSHA256; sid = $SID; allow = @($Policy.SeBatchLogonRight); deny = @($Policy.SeDenyBatchLogonRight) }
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($baseline | ConvertTo-Json -Depth 5 -Compress))
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+}
+
+function Remove-WindowsTemporaryBatchLogonAssignment {
+    param([string] $SID)
+    if ($SID -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$') { throw 'Invalid temporary build account SID' }
+    Initialize-WindowsBatchPolicyNative
+    [RunnerImage.BatchPolicy]::RemoveTemporaryBatchGrant($SID)
+}
+
+function Restore-WindowsBatchLogonBaseline {
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256)
+    $baseline = Read-WindowsBatchLogonBaseline -Root $Root -Attempt $Attempt -SourceSHA256 $SourceSHA256
+    $current = Get-WindowsBatchLogonPolicy
+    Assert-WindowsBatchLogonDelta -Baseline $baseline -Current $current
+    $expected = @($baseline.allow | Sort-Object -Unique) -join ','
+    if ((@($current.SeBatchLogonRight | Sort-Object -Unique) -join ',') -cne $expected) { Remove-WindowsTemporaryBatchLogonAssignment -SID $baseline.sid }
+    $after = Get-WindowsBatchLogonPolicy
+    if ((@($after.SeBatchLogonRight | Sort-Object -Unique) -join ',') -cne $expected -or
+        ((@($after.SeDenyBatchLogonRight | Sort-Object -Unique) -join ',') -cne (@($baseline.deny | Sort-Object -Unique) -join ','))) { throw 'Batch-logon policy did not return to its exact baseline' }
 }
 
 function Wait-WindowsImageFinalizationTask {
@@ -235,7 +339,7 @@ function Wait-WindowsImageFinalizationTask {
     $taskName = 'GitHubRunnerImageFinalize-' + $Attempt.Replace('-', '')
     $expectedAction = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if ($task.Principal.UserId -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$' -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -or $task.Actions[0].Arguments -cne $expectedAction -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M') { throw 'Refusing an unrelated or unbounded finalization task' }
+    if ($task.Principal.UserId -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$' -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -or $task.Actions[0].Arguments -cne $expectedAction -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M' -or [string]$task.Settings.MultipleInstances -notin @('IgnoreNew', '2') -or $task.Settings.RestartCount -ne 0 -or -not $task.Settings.AllowHardTerminate) { throw 'Refusing an unrelated or unbounded finalization task' }
     $principalSID = $task.Principal.UserId
     $dispatchPath = Join-Path $Root 'image-finalization.dispatched.json'
     $completedPath = Join-Path $Root 'image-finalization.complete.json'
@@ -295,10 +399,13 @@ function Wait-WindowsImageFinalizationTask {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
         if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count) { throw 'Finalization task remains after removal' }
         $ownsTask = $false
+        Restore-WindowsBatchLogonBaseline -Root $Root -Attempt $Attempt -SourceSHA256 $SourceSHA256
         Remove-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
+        if (@(Get-ChildItem -LiteralPath (Split-Path $SourcePath -Parent) -Force -ErrorAction Stop | Where-Object Name -eq (Split-Path $SourcePath -Leaf)).Count) { throw 'Staged finalizer remains after removal' }
         $proof.PSObject.Properties.Remove('accountCleanup')
         $proof.PSObject.Properties.Remove('keyIdentity')
         $proof | Add-Member -NotePropertyName finalizationTaskAbsent -NotePropertyValue $true
+        $proof | Add-Member -NotePropertyName batchLogonPolicyRestored -NotePropertyValue $true
         $pending = $observedPath + '.pending'
         [IO.File]::WriteAllText($pending, ($proof | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
         [IO.File]::Move($pending, $observedPath)
@@ -328,7 +435,7 @@ function Write-WindowsImageFinalizationPhase {
 # Tests load only functions, without preparing the host.
 if ($MyInvocation.InvocationName -eq '.') { return }
 if ($RegisterTask) {
-    Register-WindowsImageFinalizationTask -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath
+    Register-WindowsImageFinalizationTask -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath -AllowTemporaryBatchLogonAssignment:$AllowTemporaryBatchLogonAssignment
     return
 }
 Assert-WindowsFinalizationAdministrator -ExpectedSID (Get-WindowsImageBuildAccount).sid
