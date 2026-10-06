@@ -201,21 +201,109 @@ function Test-WindowsFinalizationAttempt {
 }
 Test-WindowsFinalizationAttempt
 
+
+function Test-WindowsAdministratorFinalization {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $fixture = @{ scenario = ''; sid = 'S-1-5-21-1-2-3-500'; sha = ('a' * 64); attempt = '11111111-1111-1111-1111-111111111111'; system = $false; elevated = $true; exists = $false; runs = 0; ran = $false; registrations = 0; now = [DateTime]::UtcNow }
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('runner-task-test-' + [Guid]::NewGuid().ToString('N'))
+    $source = 'C:\Windows\Temp\Complete-WindowsRunnerImage.ps1'
+    $name = 'GitHubRunnerImageFinalize-' + $fixture.attempt.Replace('-', '')
+    $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = "-NoLogo -NoProfile -NonInteractive -File `"$source`" -AttemptId $($fixture.attempt) -ExpectedScriptSHA256 $($fixture.sha)"
+    function Get-WindowsFinalizationIdentity { return [pscustomobject]@{ IsSystem = $fixture.system; User = [pscustomobject]@{ Value = $(if ($fixture.scenario -eq 'wrong-user') { 'S-1-5-21-1-2-3-1001' } else { $fixture.sid }) }; Groups = @([pscustomobject]@{ Value = 'S-1-5-32-544' }) } }
+    function Test-WindowsFinalizationElevation { return $fixture.elevated }
+    function Get-WindowsImageBuildAccount { return [pscustomobject]@{ mode = 'BuiltinAdministrator'; sid = $fixture.sid } }
+    function Get-FileHash { param($LiteralPath, $Algorithm) return [pscustomobject]@{ Hash = $fixture.sha } }
+    function Get-WindowsBatchLogonPolicy { return @{ SeBatchLogonRight = $(if ($fixture.scenario -eq 'missing-batch') { @() } else { @('S-1-5-32-544') }); SeDenyBatchLogonRight = $(if ($fixture.scenario -eq 'denied-batch') { @('S-1-5-32-544') } else { @() }) } }
+    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) return [pscustomobject]@{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel } }
+    function New-ScheduledTaskAction { param($Execute, $Argument) return [pscustomobject]@{ Execute = $Execute; Arguments = $Argument } }
+    function New-ScheduledTaskSettingsSet {
+        param($ExecutionTimeLimit, $MultipleInstances)
+        if ($ExecutionTimeLimit.TotalMinutes -ne 18 -or $MultipleInstances -ne 'IgnoreNew') { throw 'Unbounded or repeated administrator task' }
+        return [pscustomobject]@{ ExecutionTimeLimit = 'PT18M' }
+    }
+    function Register-ScheduledTask {
+        [CmdletBinding()] param($TaskName, $Action, $Principal, $Settings)
+        $fixture.registrations++; $fixture.exists = $true
+        $fixture.task = [pscustomobject]@{ TaskName = $TaskName; Actions = @($Action); Principal = $Principal; Settings = $Settings; Triggers = $null; State = 'Ready' }
+    }
+    function Get-ScheduledTask {
+        [CmdletBinding()] param($TaskName)
+        $runtime = [pscustomobject]@{ TaskName = 'GitHubEphemeralRunner'; Principal = [pscustomobject]@{ UserId = 'SYSTEM' }; State = 'Ready' }
+        if ($TaskName -eq 'GitHubEphemeralRunner') { return $runtime }
+        if ($TaskName) { if (-not $fixture.exists) { throw 'Task missing' }; return $fixture.task }
+        if ($fixture.exists) { $fixture.task }
+        $runtime
+    }
+    function Get-ScheduledTaskInfo {
+        [CmdletBinding()] param($TaskName)
+        return [pscustomobject]@{ LastRunTime = $(if ($fixture.ran -and $fixture.scenario -ne 'unchanged-run') { [DateTime]'2021-01-01T00:00:00Z' } else { [DateTime]'2020-01-01T00:00:00Z' }); LastTaskResult = $(if ($fixture.scenario -eq 'nonzero-task') { 1 } else { 0 }) }
+    }
+    function Start-ScheduledTask { [CmdletBinding()] param($TaskName) $fixture.runs++; $fixture.ran = $true; if ($fixture.scenario -eq 'task-running') { $fixture.task.State = 'Running' } }
+    function Stop-ScheduledTask { [CmdletBinding()] param($TaskName) $fixture.task.State = 'Ready' }
+    function Unregister-ScheduledTask { [CmdletBinding(SupportsShouldProcess)] param($TaskName) if ($fixture.scenario -ne 'delete-no-op') { $fixture.exists = $false } }
+    function Get-WindowsImageTaskTime { return $fixture.now }
+    function Wait-WindowsImageTaskPoll { $fixture.now = $fixture.now.AddMinutes(10) }
+    function Assert-WindowsImageAccountCleanup { param($Cleanup, $GeneralizationState) if ($fixture.scenario -eq 'account-remains' -or $GeneralizationState -cne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') { throw 'Independent account/state readback failed' } }
+    function Test-WindowsBuildCngKey { param($Identity) return $fixture.scenario -eq 'key-remains' }
+    function Get-WindowsBuildKeyFile { param($Identity) if ($fixture.scenario -eq 'key-file-remains') { return 'file' } }
+    function Get-ChildItem { [CmdletBinding()] param($Path) if ($fixture.scenario -eq 'certificate-remains' -and $Path -like 'Cert:*') { [pscustomobject]@{ Thumbprint = ('B' * 40); FriendlyName = 'GitHubRunnerPackerWinRM' } } }
+    function Get-NetFirewallRule { [CmdletBinding()] param() if ($fixture.scenario -eq 'firewall-remains') { [pscustomobject]@{ Name = 'WINRM-Packer-Build' } } }
+    function Get-ItemProperty { [CmdletBinding()] param($Path) return [pscustomobject]@{ ImageState = $(if ($fixture.scenario -eq 'incomplete-sysprep') { 'IMAGE_STATE_COMPLETE' } else { 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' }); LocalAccountTokenFilterPolicy = $(if ($fixture.scenario -eq 'token-policy-remains') { 1 } else { 0 }) } }
+    function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch] $Force) if ($LiteralPath -cne $source) { throw 'Observer deleted an unrelated file' } }
+    try {
+        foreach ($scenario in @('normal', 'system', 'wrong-user', 'not-elevated', 'missing-batch', 'denied-batch')) {
+            $fixture.scenario = $scenario; $fixture.system = $scenario -eq 'system'; $fixture.elevated = $scenario -ne 'not-elevated'; $fixture.exists = $false; $fixture.registrations = 0
+            $rejected = $false
+            try { Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source | Out-Null } catch { $rejected = $true }
+            if ($rejected -eq ($scenario -eq 'normal')) { throw "Unexpected administrator staging result: $scenario" }
+            if ($scenario -ne 'normal' -and $fixture.registrations) { throw 'Invalid administrator context registered a task' }
+            if ($scenario -eq 'normal') {
+                Register-WindowsImageFinalizationTask -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source | Out-Null
+                if ($fixture.registrations -ne 1 -or $fixture.runs) { throw 'Staging replay changed or launched the task' }
+            }
+        }
+        foreach ($scenario in @('normal', 'bad-principal', 'bad-action', 'unbounded', 'trigger', 'nonzero-task', 'unchanged-run', 'task-running', 'missing-completion', 'wrong-execution-sid', 'incomplete-sysprep', 'account-remains', 'key-remains', 'key-file-remains', 'certificate-remains', 'firewall-remains', 'token-policy-remains', 'delete-no-op')) {
+            if (Test-Path -LiteralPath $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force }
+            New-Item -ItemType Directory -Path $root | Out-Null
+            $fixture.scenario = $scenario; $fixture.system = $true; $fixture.exists = $true; $fixture.runs = 0; $fixture.ran = $false; $fixture.now = [DateTime]::UtcNow
+            $fixture.task = [pscustomobject]@{ TaskName = $name; Principal = [pscustomobject]@{ UserId = $fixture.sid; LogonType = 'S4U'; RunLevel = 'Highest' }; Actions = @([pscustomobject]@{ Execute = $executable; Arguments = $arguments }); Settings = [pscustomobject]@{ ExecutionTimeLimit = 'PT18M' }; Triggers = $null; State = 'Ready' }
+            switch ($scenario) {
+                'bad-principal' { $fixture.task.Principal.UserId = 'S-1-5-18' }
+                'bad-action' { $fixture.task.Actions[0].Arguments = 'other' }
+                'unbounded' { $fixture.task.Settings.ExecutionTimeLimit = 'PT0S' }
+                'trigger' { $fixture.task.Triggers = @('recurring') }
+            }
+            $completion = @{ attemptId = $fixture.attempt; scriptSHA256 = $fixture.sha; status = 'Succeeded'; accountCleanup = @{ mode = 'BuiltinAdministrator'; sid = $fixture.sid }; keyIdentity = @{ thumbprint = ('A' * 40) } }
+            if ($scenario -ne 'missing-completion') { $completion | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'image-finalization.complete.json') }
+            @{ attemptId = $fixture.attempt; scriptSHA256 = $fixture.sha; executionSID = $(if ($scenario -eq 'wrong-execution-sid') { 'S-1-5-18' } else { $fixture.sid }) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'image-finalization.started.json')
+            $rejected = $false; $detail = ''
+            try { $result = Wait-WindowsImageFinalizationTask -Root $root -Attempt $fixture.attempt -SourceSHA256 $fixture.sha -SourcePath $source } catch { $rejected = $true; $detail = $_.Exception.Message }
+            if ($rejected -eq ($scenario -eq 'normal')) { throw "Unexpected task observer result: $scenario; $detail" }
+            if ($scenario -eq 'normal' -and ($fixture.exists -or $fixture.runs -ne 1 -or -not $result.finalizationTaskAbsent -or -not (Test-Path (Join-Path $root 'image-finalization.observed.json')))) { throw 'Task success lacked independent removal proof' }
+            if ($scenario -in @('bad-principal', 'bad-action', 'unbounded', 'trigger') -and $fixture.runs) { throw 'Observer launched an untrusted task' }
+            if ($scenario -ne 'normal' -and (Test-Path (Join-Path $root 'image-finalization.observed.json'))) { throw 'Observer published success after failed readback' }
+        }
+    } finally { if (Test-Path -LiteralPath $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force } }
+    Write-Output 'Administrator S4U staging, identity/elevation/policy gates, independent completion/readbacks, and task cleanup tests passed.'
+}
+Test-WindowsAdministratorFinalization
+
 function Test-WindowsManagedFinalization {
     . (Join-Path $PSScriptRoot 'Invoke-WindowsImageFinalization.ps1')
     $subscription = '00000000-0000-0000-0000-000000000000'
     $attempt = '11111111-1111-1111-1111-111111111111'
     $sha = 'a' * 64
     $vmId = "/subscriptions/$subscription/resourceGroups/packer-fixture/providers/Microsoft.Compute/virtualMachines/pkrvmfixture"
-    $proof = @{ schemaVersion = 1; attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded'; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; buildAccountRetired = $true; privateKeyAbsent = $true; certificateAbsent = $true; winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true }
-    $state = @{}
-    function Get-WindowsFinalizationTime { return $state.now }
-    function Wait-WindowsFinalizationPoll { $state.now = $state.now.AddSeconds(60) }
+    $proof = @{ schemaVersion = 1; attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded'; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; buildAccountRetired = $true; privateKeyAbsent = $true; certificateAbsent = $true; winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true; finalizationTaskAbsent = $true }
+    $testState = @{}
+    function Get-WindowsFinalizationTime { return $testState.now }
+    function Wait-WindowsFinalizationPoll { $testState.now = $testState.now.AddSeconds(60) }
     function Throw-TestAzureStatus {
         param([int] $Status)
-        $error = [InvalidOperationException]::new('Simulated Azure response')
-        $error.Data['StatusCode'] = $Status
-        throw $error
+        $simulatedFailure = [InvalidOperationException]::new('Simulated Azure response')
+        $simulatedFailure.Data['StatusCode'] = $Status
+        throw $simulatedFailure
     }
     function New-TestCommand {
         return [pscustomobject]@{
@@ -229,42 +317,42 @@ function Test-WindowsManagedFinalization {
     function Invoke-WindowsImageRest {
         param($Method, $Uri, $Body)
         if ($Uri -like '*/permissions?*') {
-            if ($state.scenario -eq 'denied-permission-read') { Throw-TestAzureStatus 403 }
+            if ($testState.scenario -eq 'denied-permission-read') { Throw-TestAzureStatus 403 }
             $notActions = @()
-            if ($state.scenario -eq 'missing-permission') { $notActions = @('Microsoft.Compute/virtualMachines/runCommands/write') }
+            if ($testState.scenario -eq 'missing-permission') { $notActions = @('Microsoft.Compute/virtualMachines/runCommands/write') }
             return [pscustomobject]@{ value = @([pscustomobject]@{ actions = @('Microsoft.Compute/*'); notActions = $notActions }) }
         }
         if ($Uri -notlike '*/runCommands/*') {
             if ($Method -ne 'GET' -or $Uri -notlike "https://management.azure.com$vmId`?*") { throw 'Unexpected finalizer target' }
-            return [pscustomobject]@{ id = $vmId; location = 'eastus2'; tags = [pscustomobject]@{ 'managed-by' = 'packer'; project = $(if ($state.scenario -eq 'foreign-vm') { 'other' } else { 'github-actions-runners' }) }; properties = [pscustomobject]@{ storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ osType = 'Windows' } } } }
+            return [pscustomobject]@{ id = $vmId; location = 'eastus2'; tags = [pscustomobject]@{ 'managed-by' = 'packer'; project = $(if ($testState.scenario -eq 'foreign-vm') { 'other' } else { 'github-actions-runners' }) }; properties = [pscustomobject]@{ storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ osType = 'Windows' } } } }
         }
         switch ($Method) {
             'PUT' {
-                $state.puts++
-                if ($state.puts -ne 1) { throw 'Finalization was resubmitted' }
+                $testState.puts++
+                if ($testState.puts -ne 1) { throw 'Finalization was resubmitted' }
                 if (-not $Body.properties.asyncExecution -or $Body.properties.timeoutInSeconds -ne 1200 -or -not $Body.properties.treatFailureAsDeploymentFailure -or $Body.properties.ContainsKey('runAsPassword') -or $Body.properties.ContainsKey('outputBlobUri')) { throw 'Unexpected managed command execution or credential contract' }
                 if ($Body.properties.source.script -notmatch 'Get-FileHash' -or $Body.properties.source.script -notmatch [regex]::Escape($sha)) { throw 'Guest finalizer source is not pinned' }
-                if ($state.scenario -eq 'put-denied') { Throw-TestAzureStatus 403 }
-                if ($state.scenario -ne 'put-missing') { $state.exists = $true }
-                if ($state.scenario -in @('put-uncertain', 'put-missing')) { Throw-TestAzureStatus 0 }
+                if ($testState.scenario -eq 'put-denied') { Throw-TestAzureStatus 403 }
+                if ($testState.scenario -ne 'put-missing') { $testState.exists = $true }
+                if ($testState.scenario -in @('put-uncertain', 'put-missing')) { Throw-TestAzureStatus 0 }
                 return
             }
             'DELETE' {
-                $state.deletes++
-                if ($state.scenario -ne 'delete-no-op') { $state.exists = $false }
-                if ($state.scenario -eq 'delete-uncertain') { Throw-TestAzureStatus 0 }
+                $testState.deletes++
+                if ($testState.scenario -ne 'delete-no-op') { $testState.exists = $false }
+                if ($testState.scenario -eq 'delete-uncertain') { Throw-TestAzureStatus 0 }
                 return
             }
             'GET' {
-                if (-not $state.exists) { Throw-TestAzureStatus 404 }
+                if (-not $testState.exists) { Throw-TestAzureStatus 404 }
                 $command = New-TestCommand
-                if ($state.scenario -eq 'foreign-command') { $command.tags.'finalization-attempt' = 'unrelated' }
+                if ($testState.scenario -eq 'foreign-command') { $command.tags.'finalization-attempt' = 'unrelated' }
                 if ($Uri -like '*$expand=instanceView') {
-                    $state.polls++
-                    if ($state.scenario -eq 'throttled-read' -and $state.polls -eq 1) { Throw-TestAzureStatus 429 }
-                    if ($state.scenario -in @('timeout', 'running-then-success') -and ($state.scenario -eq 'timeout' -or $state.polls -lt 3)) { $command.properties.instanceView.executionState = 'Running' }
-                    if ($state.scenario -eq 'failed-command') { $command.properties.instanceView.executionState = 'Failed'; $command.properties.instanceView.exitCode = 1 }
-                    if ($state.scenario -eq 'bad-proof') { $command.properties.instanceView.output = '' }
+                    $testState.polls++
+                    if ($testState.scenario -eq 'throttled-read' -and $testState.polls -eq 1) { Throw-TestAzureStatus 429 }
+                    if ($testState.scenario -in @('timeout', 'running-then-success') -and ($testState.scenario -eq 'timeout' -or $testState.polls -lt 3)) { $command.properties.instanceView.executionState = 'Running' }
+                    if ($testState.scenario -eq 'failed-command') { $command.properties.instanceView.executionState = 'Failed'; $command.properties.instanceView.exitCode = 1 }
+                    if ($testState.scenario -eq 'bad-proof') { $command.properties.instanceView.output = '' }
                 }
                 return $command
             }
@@ -272,19 +360,20 @@ function Test-WindowsManagedFinalization {
         }
     }
     foreach ($scenario in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command', 'put-denied', 'put-missing', 'timeout', 'failed-command', 'bad-proof', 'delete-no-op')) {
-        $state.Clear()
-        $state.scenario = $scenario; $state.now = [DateTime]::UtcNow; $state.puts = 0; $state.deletes = 0; $state.polls = 0; $state.exists = $scenario -in @('existing', 'foreign-command')
+        $testState.Clear()
+        $testState.scenario = $scenario; $testState.now = [DateTime]::UtcNow; $testState.puts = 0; $testState.deletes = 0; $testState.polls = 0; $testState.exists = $scenario -in @('existing', 'foreign-command')
         $rejected = $false
-        try { $result = Invoke-WindowsImageFinalization -Subscription $subscription -Group 'packer-fixture' -VM 'pkrvmfixture' -Region 'eastus2' -SourceSHA256 $sha -Attempt $attempt } catch { $rejected = $true }
+        $failureDetail = ''
+        try { $result = Invoke-WindowsImageFinalization -Subscription $subscription -Group 'packer-fixture' -VM 'pkrvmfixture' -Region 'eastus2' -SourceSHA256 $sha -Attempt $attempt } catch { $rejected = $true; $failureDetail = $_.Exception.Message }
         $success = $scenario -in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain')
-        if ($rejected -eq $success) { throw "Unexpected managed finalization result: $scenario" }
+        if ($rejected -eq $success) { throw "Unexpected managed finalization result: $scenario; $failureDetail" }
         $expectedPuts = $(if ($scenario -in @('existing', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command')) { 0 } else { 1 })
-        if ($state.puts -ne $expectedPuts) { throw "Managed command submission count changed: $scenario" }
-        if ($success -and ($state.exists -or $state.deletes -ne 1 -or $result.attemptId -cne $attempt)) { throw "Capture accepted unconfirmed cleanup: $scenario" }
-        if ($scenario -eq 'foreign-command' -and $state.deletes) { throw 'Deleted an unrelated command' }
-        if ($scenario -eq 'timeout' -and ($state.deletes -ne 1 -or $state.exists)) { throw 'Timed-out command was not cancelled and removed' }
+        if ($testState.puts -ne $expectedPuts) { throw "Managed command submission count changed: $scenario" }
+        if ($success -and ($testState.exists -or $testState.deletes -ne 1 -or $result.attemptId -cne $attempt)) { throw "Capture accepted unconfirmed cleanup: $scenario" }
+        if ($scenario -eq 'foreign-command' -and $testState.deletes) { throw 'Deleted an unrelated command' }
+        if ($scenario -eq 'timeout' -and ($testState.deletes -ne 1 -or $testState.exists)) { throw 'Timed-out command was not cancelled and removed' }
     }
-    foreach ($scenario in @('nonzero', 'no-exit', 'running', 'bad-attempt', 'bad-sha', 'bad-sysprep', 'false-key', 'string-bool', 'missing-field', 'empty-output', 'duplicate-proof')) {
+    foreach ($scenario in @('nonzero', 'no-exit', 'running', 'bad-attempt', 'bad-sha', 'bad-sysprep', 'false-key', 'string-bool', 'missing-field', 'task-remains', 'empty-output', 'duplicate-proof')) {
         $command = New-TestCommand
         $record = $proof | ConvertTo-Json | ConvertFrom-Json
         switch ($scenario) {
@@ -297,6 +386,7 @@ function Test-WindowsManagedFinalization {
             'false-key' { $record.privateKeyAbsent = $false }
             'string-bool' { $record.privateKeyAbsent = 'true' }
             'missing-field' { $record.PSObject.Properties.Remove('privateKeyAbsent') }
+            'task-remains' { $record.finalizationTaskAbsent = $false }
         }
         $command.properties.instanceView.output = 'GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Compress)
         if ($scenario -eq 'empty-output') { $command.properties.instanceView.output = '' }

@@ -84,7 +84,7 @@ function Read-WindowsFinalizationProof {
     if ($lines.Count -ne 1) { throw 'Missing or ambiguous per-attempt finalization proof' }
     $proof = $lines[0].Substring('GHA_IMAGE_FINALIZATION '.Length) | ConvertFrom-Json
     if ($proof.schemaVersion -ne 1 -or $proof.attemptId -cne $ExpectedAttempt -or $proof.scriptSHA256 -cne $ExpectedSHA256 -or $proof.status -cne 'Succeeded' -or $proof.sysprepState -cne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') { throw 'Finalization proof does not match this build attempt and source' }
-    foreach ($field in @('buildAccountRetired', 'privateKeyAbsent', 'certificateAbsent', 'winrmListenersAbsent', 'buildFirewallRuleAbsent', 'tokenPolicyRestored', 'runtimeTaskPresent')) {
+    foreach ($field in @('buildAccountRetired', 'privateKeyAbsent', 'certificateAbsent', 'winrmListenersAbsent', 'buildFirewallRuleAbsent', 'tokenPolicyRestored', 'runtimeTaskPresent', 'finalizationTaskAbsent')) {
         $value = Get-FinalizationProperty $proof $field
         if ($value -isnot [bool] -or -not $value) { throw "Finalization proof lacks verified $field" }
     }
@@ -99,7 +99,7 @@ function Remove-WindowsFinalizationCommand {
         try { $command = Invoke-WindowsImageRest GET $Uri $null }
         catch {
             if ($_.Exception.Data['StatusCode'] -eq 404) { return }
-            if ($_.Exception.Data['StatusCode'] -notin @(429, 503)) { throw }
+            if ($_.Exception.Data['StatusCode'] -notin @(0, 429, 503)) { throw }
             Wait-WindowsFinalizationPoll; continue
         }
         if ($command.tags.'finalization-attempt' -cne $ExpectedAttempt -or $command.tags.'finalizer-sha256' -cne $ExpectedSHA256) { throw 'Refusing cleanup of an unrelated managed command' }
@@ -120,6 +120,7 @@ function Invoke-WindowsImageFinalization {
     param([string] $Subscription, [string] $Group, [string] $VM, [string] $Region, [string] $SourceSHA256, [string] $Attempt)
     $guidPattern = '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
     if ($Subscription -inotmatch $guidPattern -or $Group -cnotmatch '^[A-Za-z0-9_.()-]+$' -or $VM -cnotmatch '^pkrvm[A-Za-z0-9]+$' -or $Region -cne 'eastus2' -or $SourceSHA256 -cnotmatch '^[a-f0-9]{64}$' -or $Attempt -cnotmatch $guidPattern) { throw 'Invalid Packer finalization target or attempt' }
+    $deadline = (Get-WindowsFinalizationTime).AddSeconds(1320)
     $vmId = "/subscriptions/$Subscription/resourceGroups/$Group/providers/Microsoft.Compute/virtualMachines/$VM"
     $baseUri = "https://management.azure.com$vmId"
     $machine = Invoke-WindowsImageRest GET ($baseUri + '?api-version=2023-03-01') $null
@@ -127,6 +128,7 @@ function Invoke-WindowsImageFinalization {
     $permissions = @()
     $permissionUri = $baseUri + '/providers/Microsoft.Authorization/permissions?api-version=2022-04-01'
     while ($permissionUri) {
+        if ((Get-WindowsFinalizationTime) -ge $deadline) { throw 'Finalization preflight exceeded its observation deadline' }
         if (-not $permissionUri.StartsWith($baseUri + '/providers/Microsoft.Authorization/permissions?', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected permission pagination target' }
         $page = Invoke-WindowsImageRest GET $permissionUri $null
         $permissions += @($page.value)
@@ -139,20 +141,23 @@ function Invoke-WindowsImageFinalization {
 $ErrorActionPreference = 'Stop'
 $attempt = '__ATTEMPT__'
 $sha = '__SHA__'
-$completed = "$env:ProgramData\GitHubRunner\image-finalization.complete.json"
-if (-not (Test-Path -LiteralPath $completed)) {
+$root = "$env:ProgramData\GitHubRunner"
+$observed = Join-Path $root 'image-finalization.observed.json'
+if (-not (Test-Path -LiteralPath $observed)) {
     $script = 'C:\Windows\Temp\Complete-WindowsRunnerImage.ps1'
     if ((Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sha) { throw 'Staged finalizer checksum mismatch' }
-    & $script -AttemptId $attempt -ExpectedScriptSHA256 $sha
+    . $script
+    $null = Wait-WindowsImageFinalizationTask -Root $root -Attempt $attempt -SourceSHA256 $sha -SourcePath $script
 }
-$record = Get-Content -LiteralPath $completed -Raw | ConvertFrom-Json
-if ($record.attemptId -cne $attempt -or $record.scriptSHA256 -cne $sha -or $record.status -cne 'Succeeded') { throw 'Finalization record belongs to another attempt or failed' }
+$record = Get-Content -LiteralPath $observed -Raw | ConvertFrom-Json
+if ($record.attemptId -cne $attempt -or $record.scriptSHA256 -cne $sha -or $record.status -cne 'Succeeded') { throw 'Observed finalization belongs to another attempt or failed' }
 Write-Output ('GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Depth 5 -Compress))
 '@
     $source = $source.Replace('__ATTEMPT__', $Attempt).Replace('__SHA__', $SourceSHA256)
     $body = @{ location = $Region; tags = @{ 'finalization-attempt' = $Attempt; 'finalizer-sha256' = $SourceSHA256 }; properties = @{ source = @{ script = $source }; asyncExecution = $true; timeoutInSeconds = 1200; treatFailureAsDeploymentFailure = $true } }
     $ownsCommand = $false
     $failure = $null
+    $lastPhase = 'not-reported'
     try {
         $existing = $null
         try { $existing = Invoke-WindowsImageRest GET $readUri $null }
@@ -160,35 +165,40 @@ Write-Output ('GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Depth 5 -Co
         if ($null -ne $existing -and ($existing.tags.'finalization-attempt' -cne $Attempt -or $existing.tags.'finalizer-sha256' -cne $SourceSHA256)) { throw 'Managed command identity is already owned by another attempt' }
         $ownsCommand = $true
         if ($null -eq $existing) {
+            if ((Get-WindowsFinalizationTime) -ge $deadline) { throw 'Finalization preflight exceeded its observation deadline' }
             # Submit once. An uncertain PUT is reconciled by reading this identity.
             try { $null = Invoke-WindowsImageRest PUT $commandUri $body }
             catch { if ($_.Exception.Data['StatusCode'] -in @(400, 401, 403)) { throw } }
         }
-        $deadline = (Get-WindowsFinalizationTime).AddSeconds(1320)
         $missingDeadline = (Get-WindowsFinalizationTime).AddSeconds(90)
         while ((Get-WindowsFinalizationTime) -lt $deadline) {
             try { $command = Invoke-WindowsImageRest GET $readUri $null }
             catch {
                 $status = $_.Exception.Data['StatusCode']
                 if ($status -eq 404 -and (Get-WindowsFinalizationTime) -lt $missingDeadline) { Wait-WindowsFinalizationPoll; continue }
-                if ($status -in @(429, 503)) { Wait-WindowsFinalizationPoll; continue }
+                if ($status -in @(0, 429, 503)) { Wait-WindowsFinalizationPoll; continue }
                 throw
             }
             if ($command.tags.'finalization-attempt' -cne $Attempt -or $command.tags.'finalizer-sha256' -cne $SourceSHA256) { throw 'Managed command ownership changed while polling' }
             $view = Get-FinalizationProperty $command.properties 'instanceView'
             $state = [string] (Get-FinalizationProperty $view 'executionState')
+            $phase = @(([string] (Get-FinalizationProperty $view 'output') -split '\r?\n') | Where-Object { $_ -cmatch '^Finalization phase: [a-z-]+$' } | Select-Object -Last 1)
+            if ($phase.Count -eq 1 -and $phase[0] -cne $lastPhase) {
+                $lastPhase = $phase[0]
+                Write-Host "$((Get-WindowsFinalizationTime).ToString('o')) $lastPhase"
+            }
             if ($state -ceq 'Succeeded') { return Read-WindowsFinalizationProof -Command $command -ExpectedAttempt $Attempt -ExpectedSHA256 $SourceSHA256 }
             if ($state -in @('Failed', 'TimedOut', 'Canceled') -or (Get-FinalizationProperty $command.properties 'provisioningState') -eq 'Failed') {
                 # Preserve only our fixed phase labels, not raw guest errors or
                 # provider payloads which could contain unrelated machine data.
-                $phase = @(([string] (Get-FinalizationProperty $view 'output') -split '\r?\n') | Where-Object { $_ -cmatch '^Finalization phase: [a-z-]+$' } | Select-Object -Last 1)
-                throw "Managed finalization failed: executionState=$state; $($phase -join '')"
+                throw "Managed finalization failed: executionState=$state; $lastPhase"
             }
             Wait-WindowsFinalizationPoll
         }
         throw 'Managed finalization timed out without independent completion proof'
     } catch {
         $failure = $_
+        Write-Warning "Finalization rejected before capture; last observed guest phase: $lastPhase"
         throw
     } finally {
         if ($ownsCommand) {
@@ -204,4 +214,5 @@ Write-Output ('GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Depth 5 -Co
 if ($MyInvocation.InvocationName -ne '.') {
     $proof = Invoke-WindowsImageFinalization -Subscription $SubscriptionId -Group $ResourceGroupName -VM $VmName -Region $Location -SourceSHA256 $FinalizerSHA256 -Attempt $AttemptId
     Write-Output "Verified image finalization for attempt $($proof.attemptId); managed command cleanup confirmed."
+    Write-Output ('GHA_IMAGE_FINALIZATION_VERIFIED ' + ($proof | ConvertTo-Json -Depth 5 -Compress))
 }

@@ -107,6 +107,11 @@ build {
     source      = "${path.root}/scripts/Complete-WindowsRunnerImage.ps1"
     destination = "C:/Windows/Temp/Complete-WindowsRunnerImage.ps1"
   }
+  provisioner "powershell" {
+    inline = [
+      "& 'C:\\Windows\\Temp\\Complete-WindowsRunnerImage.ps1' -RegisterTask -AttemptId '${build.PackerRunUUID}' -ExpectedScriptSHA256 '${sha256(file("${path.root}/scripts/Complete-WindowsRunnerImage.ps1"))}'"
+    ]
+  }
   # Generalization retires WinRM itself. Observe completion through the existing
   # VM agent and operator Azure login, without another WinRM authentication.
   provisioner "shell-local" {
@@ -119,7 +124,7 @@ build {
       "-ResourceGroupName", build.TempResourceGroupName,
       "-VmName", build.TempComputeName,
       "-Location", var.location,
-      "-FinalizerSHA256", filesha256("${path.root}/scripts/Complete-WindowsRunnerImage.ps1"),
+      "-FinalizerSHA256", sha256(file("${path.root}/scripts/Complete-WindowsRunnerImage.ps1")),
       "-AttemptId", build.PackerRunUUID
     ]
   }

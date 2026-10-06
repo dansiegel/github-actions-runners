@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string] $AttemptId, [string] $ExpectedScriptSHA256)
+param([string] $AttemptId, [string] $ExpectedScriptSHA256, [switch] $RegisterTask)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -140,17 +140,50 @@ function Remove-WindowsImageBuildCertificate {
 }
 
 function Start-WindowsImageFinalizationAttempt {
-    param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SourcePath, [string] $ExecutionSID)
     if ($Attempt -cnotmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' -or $SourceSHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid finalization identity' }
     if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $SourceSHA256) { throw 'Finalizer source changed after staging' }
     # CreateNew is atomic. Even a failed attempt keeps this marker, so neither a
     # replay nor another command identity can run Sysprep twice on this builder.
     $stream = [IO.File]::Open((Join-Path $Root 'image-finalization.started.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes((@{ attemptId = $Attempt; scriptSHA256 = $SourceSHA256 } | ConvertTo-Json -Compress))
+        $bytes = [Text.Encoding]::UTF8.GetBytes((@{ attemptId = $Attempt; scriptSHA256 = $SourceSHA256; executionSID = $ExecutionSID } | ConvertTo-Json -Compress))
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush()
     } finally { $stream.Dispose() }
+}
+
+function Register-WindowsImageFinalizationTask {
+    param([string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
+    if ($Attempt -cnotmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' -or $SourceSHA256 -cnotmatch '^[a-f0-9]{64}$' -or $SourcePath -ine 'C:\Windows\Temp\Complete-WindowsRunnerImage.ps1') { throw 'Invalid finalization task identity' }
+    if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $SourceSHA256) { throw 'Finalizer source changed after staging' }
+    $identity = Get-WindowsFinalizationIdentity
+    $account = Get-WindowsImageBuildAccount
+    Assert-WindowsFinalizationAdministrator -ExpectedSID $account.sid
+    Assert-WindowsBatchLogonPolicy -Policy (Get-WindowsBatchLogonPolicy) -Identity $identity
+    $taskName = 'GitHubRunnerImageFinalize-' + $Attempt.Replace('-', '')
+    $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
+    $existing = @(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName)
+    if (-not $existing.Count) {
+        # Same-user S4U stores no password. Existing administrators have batch
+        # logon rights by default; never grant a missing right or change an ACL.
+        $principal = New-ScheduledTaskPrincipal -UserId $account.sid -LogonType S4U -RunLevel Highest
+        $action = New-ScheduledTaskAction -Execute $executable -Argument $arguments
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMinutes(18)) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
+    }
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.Principal.UserId -cne $account.sid -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $executable -or $task.Actions[0].Arguments -cne $arguments -or @($task.Triggers | Where-Object { $null -ne $_ }).Count) { throw 'Finalization task does not match the staged administrator action' }
+    Write-Output "Staged independent administrator finalization task for attempt $Attempt; not started."
+}
+
+function Get-WindowsFinalizationIdentity { return [Security.Principal.WindowsIdentity]::GetCurrent() }
+function Test-WindowsFinalizationElevation { return ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+function Assert-WindowsFinalizationAdministrator {
+    param([string] $ExpectedSID)
+    $identity = Get-WindowsFinalizationIdentity
+    if ($identity.IsSystem -or $identity.User.Value -cne $ExpectedSID -or -not (Test-WindowsFinalizationElevation)) { throw 'Sysprep requires the existing elevated build administrator, never SYSTEM' }
 }
 
 function Complete-WindowsImageFinalizationAttempt {
@@ -168,12 +201,141 @@ function Complete-WindowsImageFinalizationAttempt {
     [IO.File]::Move($pending, (Join-Path $Root 'image-finalization.complete.json'))
 }
 
+
+function Get-WindowsBatchLogonPolicy {
+    $path = [IO.Path]::GetTempFileName()
+    try {
+        & "$env:SystemRoot\System32\secedit.exe" /export /cfg $path /areas USER_RIGHTS /quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing batch-logon policy' }
+        $policy = @{}
+        foreach ($right in @('SeBatchLogonRight', 'SeDenyBatchLogonRight')) {
+            $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match ('^' + $right + '\s*=') })
+            if ($line.Count -gt 1) { throw 'Ambiguous batch-logon policy' }
+            $policy[$right] = @()
+            if ($line.Count -eq 1) {
+                $policy[$right] = @(($line[0] -split '=', 2)[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') } | Where-Object { $_ })
+            }
+        }
+        return $policy
+    } finally { Remove-Item -LiteralPath $path -Force }
+}
+
+function Assert-WindowsBatchLogonPolicy {
+    param($Policy, $Identity)
+    $identities = @($Identity.User.Value) + @($Identity.Groups | ForEach-Object { $_.Value })
+    if (@($Policy.SeDenyBatchLogonRight | Where-Object { $_ -in $identities }).Count) { throw 'Existing policy denies batch logon for the build administrator' }
+    # The caller has already proved its elevated Administrators token. Fail on
+    # unfamiliar name-based assignments instead of modifying local policy.
+    if (-not @($Policy.SeBatchLogonRight | Where-Object { $_ -in @($Identity.User.Value, 'S-1-5-32-544') }).Count) { throw 'Existing build administrator lacks batch-logon permission' }
+}
+
+function Wait-WindowsImageFinalizationTask {
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
+    if (-not (Get-WindowsFinalizationIdentity).IsSystem) { throw 'Managed observer must use the Azure agent identity' }
+    $taskName = 'GitHubRunnerImageFinalize-' + $Attempt.Replace('-', '')
+    $expectedAction = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($task.Principal.UserId -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$' -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -or $task.Actions[0].Arguments -cne $expectedAction -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M') { throw 'Refusing an unrelated or unbounded finalization task' }
+    $principalSID = $task.Principal.UserId
+    $dispatchPath = Join-Path $Root 'image-finalization.dispatched.json'
+    $completedPath = Join-Path $Root 'image-finalization.complete.json'
+    $observedPath = Join-Path $Root 'image-finalization.observed.json'
+    $ownsTask = $true
+    try {
+        if (-not (Test-Path -LiteralPath $dispatchPath)) {
+            $account = Get-WindowsImageBuildAccount
+            if ($account.sid -cne $principalSID) { throw 'Finalization task does not belong to the build administrator' }
+            $before = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            $record = @{ attemptId = $Attempt; scriptSHA256 = $SourceSHA256; priorRunTime = $before.LastRunTime.ToUniversalTime().ToString('o') }
+            $stream = [IO.File]::Open($dispatchPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Compress))
+                $stream.Write($bytes, 0, $bytes.Length)
+            } finally { $stream.Dispose() }
+            # This starts the previously staged own-user S4U task. No credential
+            # crosses the agent boundary, and no second launch is attempted.
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        }
+        $dispatch = Get-Content -LiteralPath $dispatchPath -Raw | ConvertFrom-Json
+        if ($dispatch.attemptId -cne $Attempt -or $dispatch.scriptSHA256 -cne $SourceSHA256) { throw 'Dispatch marker belongs to another attempt' }
+        $deadline = (Get-WindowsImageTaskTime).AddMinutes(19)
+        $lastPhase = ''
+        while ((Get-WindowsImageTaskTime) -lt $deadline) {
+            $phasePath = Join-Path $Root 'image-finalization.phase.txt'
+            if (Test-Path -LiteralPath $phasePath) {
+                $phase = (Get-Content -LiteralPath $phasePath -Raw).Trim()
+                if ($phase -cmatch '^Finalization phase: [a-z-]+$' -and $phase -cne $lastPhase) { Write-Host $phase; $lastPhase = $phase }
+            }
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            $newRun = $info.LastRunTime.ToUniversalTime() -gt [DateTime]::Parse($dispatch.priorRunTime).ToUniversalTime()
+            if ($newRun -and $task.State -notin @('Running', 'Queued')) {
+                if ($info.LastTaskResult -ne 0) { throw "Administrator finalization task failed with code $($info.LastTaskResult)" }
+                if (-not (Test-Path -LiteralPath $completedPath)) { throw 'Task exited without finalization completion' }
+                break
+            }
+            Wait-WindowsImageTaskPoll
+        }
+        if (-not $newRun -or $task.State -in @('Running', 'Queued')) { throw 'Administrator finalization task did not finish before its deadline' }
+        $proof = Get-Content -LiteralPath $completedPath -Raw | ConvertFrom-Json
+        if ($proof.attemptId -cne $Attempt -or $proof.scriptSHA256 -cne $SourceSHA256 -or $proof.status -cne 'Succeeded' -or $proof.accountCleanup.sid -cne $principalSID) { throw 'Task completion does not match the current administrator attempt' }
+        $started = Get-Content -LiteralPath (Join-Path $Root 'image-finalization.started.json') -Raw | ConvertFrom-Json
+        if ($started.attemptId -cne $Attempt -or $started.scriptSHA256 -cne $SourceSHA256 -or $started.executionSID -cne $principalSID) { throw 'Task did not confirm execution as the expected administrator' }
+        # Independent agent-side readbacks, after the administrator process has
+        # exited. Never accept the worker's boolean assertions on their own.
+        $imageState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
+        Assert-WindowsImageAccountCleanup -Cleanup $proof.accountCleanup -GeneralizationState $imageState
+        if ((Test-WindowsBuildCngKey -Identity $proof.keyIdentity) -or (Get-WindowsBuildKeyFile -Identity $proof.keyIdentity)) { throw 'Observer cannot verify build private-key absence' }
+        if (@(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop | Where-Object { $_.Thumbprint -ieq $proof.keyIdentity.thumbprint -or $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' }).Count) { throw 'Observer found the build certificate' }
+        if (@(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop).Count) { throw 'Observer found a WinRM listener' }
+        if (@(Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build').Count) { throw 'Observer found the build firewall rule' }
+        if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).LocalAccountTokenFilterPolicy -ne 0) { throw 'Observer found the build token policy' }
+        $runtime = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop
+        if ($runtime.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $runtime.State -eq 'Disabled') { throw 'Observer could not verify the runtime SYSTEM task' }
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+        if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count) { throw 'Finalization task remains after removal' }
+        $ownsTask = $false
+        Remove-Item -LiteralPath $SourcePath -Force -ErrorAction Stop
+        $proof.PSObject.Properties.Remove('accountCleanup')
+        $proof.PSObject.Properties.Remove('keyIdentity')
+        $proof | Add-Member -NotePropertyName finalizationTaskAbsent -NotePropertyValue $true
+        $pending = $observedPath + '.pending'
+        [IO.File]::WriteAllText($pending, ($proof | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($pending, $observedPath)
+        return $proof
+    } finally {
+        if ($ownsTask) {
+            # Agent cancellation may interrupt this block. The task's own 18m
+            # limit and Packer's VM/resource-group teardown remain mandatory.
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            $remaining = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            if ($remaining.State -in @('Running', 'Queued')) { throw 'Finalization task termination was not confirmed' }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+            if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count) { throw 'Failed finalization task remains after removal' }
+        }
+    }
+}
+
+function Get-WindowsImageTaskTime { return [DateTime]::UtcNow }
+function Wait-WindowsImageTaskPoll { Start-Sleep -Seconds 5 }
+function Write-WindowsImageFinalizationPhase {
+    param([string] $Root, [string] $Phase)
+    $line = 'Finalization phase: ' + $Phase
+    [IO.File]::WriteAllText((Join-Path $Root 'image-finalization.phase.txt'), $line)
+    Write-Output $line
+}
+
 # Tests load only functions, without preparing the host.
 if ($MyInvocation.InvocationName -eq '.') { return }
+if ($RegisterTask) {
+    Register-WindowsImageFinalizationTask -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath
+    return
+}
+Assert-WindowsFinalizationAdministrator -ExpectedSID (Get-WindowsImageBuildAccount).sid
 
 $stateRoot = "$env:ProgramData\GitHubRunner"
-Start-WindowsImageFinalizationAttempt -Root $stateRoot -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath
-Write-Output 'Finalization phase: image-preflight'
+Start-WindowsImageFinalizationAttempt -Root $stateRoot -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath -ExecutionSID (Get-WindowsFinalizationIdentity).User.Value
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'image-preflight'
 $runnerRoot = "$env:SystemDrive\actions-runner"
 $manifest = Get-Content -LiteralPath (Join-Path $stateRoot 'manifest.json') -Raw | ConvertFrom-Json
 foreach ($probe in @(
@@ -205,7 +367,7 @@ $buildCertificate = Get-WindowsImageBuildCertificate
 foreach ($service in Get-Service -Name RdAgent, WindowsAzureGuestAgent -ErrorAction Stop) {
     if ($service.Status -ne 'Running') { throw "Azure guest agent is not ready: $($service.Name)" }
 }
-Write-Output 'Finalization phase: sysprep'
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'sysprep'
 & "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /quit /mode:vm
 if ($LASTEXITCODE -ne 0) { throw 'Sysprep failed' }
 $deadline = [DateTime]::UtcNow.AddMinutes(15)
@@ -215,11 +377,11 @@ while ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\
 }
 # Remove the recorded build key before changing the account context. Sysprep can
 # change key availability; no missing-key or access error is assumed successful.
-Write-Output 'Finalization phase: certificate-cleanup'
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'certificate-cleanup'
 $certificateCleanup = Remove-WindowsImageBuildCertificate -Identity $buildCertificate
 # Retire the identity only after Sysprep polling, before the final command exits.
 # The managed command uses the VM agent, independently of the retired account.
-Write-Output 'Finalization phase: account-cleanup'
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'account-cleanup'
 $accountCleanup = Remove-WindowsImageBuildAccount -Expected $buildAccount
 Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
 $manifest | Add-Member -NotePropertyName imageAccountCleanup -NotePropertyValue @{ mode = $accountCleanup.mode; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; serverSysprepCompleted = $true; buildAccountAbsent = $true } -Force
@@ -229,7 +391,7 @@ Write-Host "Image build account retired; mode: $($accountCleanup.mode); Server S
 
 # Completion travels over the VM agent, so retiring WinRM cannot acknowledge
 # success accidentally. Every readback must succeed before publishing proof.
-Write-Output 'Finalization phase: remoting-cleanup'
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'remoting-cleanup'
 Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop | Remove-Item -Recurse -Force -ErrorAction Stop
 Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build' | Remove-NetFirewallRule -ErrorAction Stop
 New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 0 -Force | Out-Null
@@ -240,10 +402,11 @@ $runtimeTask = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction 
 if ($runtimeTask.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $runtimeTask.State -eq 'Disabled') { throw 'Runtime SYSTEM startup task is missing or disabled' }
 $generalizationState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
 Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState $generalizationState
-Remove-Item -LiteralPath $PSCommandPath -Force
 Complete-WindowsImageFinalizationAttempt -Root $stateRoot -Record @{
     schemaVersion = 1; attemptId = $AttemptId; scriptSHA256 = $ExpectedScriptSHA256; status = 'Succeeded'
     sysprepState = $generalizationState; buildAccountRetired = $true
     privateKeyAbsent = $certificateCleanup.privateKeyAbsent; certificateAbsent = $certificateCleanup.certificateAbsent
     winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true
+    accountCleanup = $accountCleanup
+    keyIdentity = @{ thumbprint = $buildCertificate.thumbprint; provider = $buildCertificate.provider; machineKey = $buildCertificate.machineKey; keyName = $buildCertificate.keyName; uniqueName = $buildCertificate.uniqueName }
 }
