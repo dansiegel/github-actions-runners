@@ -39,7 +39,7 @@ variable "allow_temporary_batch_logon_assignment" {
   default = false
   validation {
     condition     = var.allow_temporary_batch_logon_assignment
-    error_message = "Approve Task Scheduler's possible explicit batch-logon assignment for the existing build administrator and restoration of the exact baseline before opting in."
+    error_message = "Approve Task Scheduler's possible explicit batch-logon assignment for the existing build administrator and restoration of the exact baseline before setting allow_temporary_batch_logon_assignment=true."
   }
 }
 variable "runner_version" {

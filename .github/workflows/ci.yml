@@ -72,6 +72,7 @@ jobs:
             -var resource_group_name=gha-runners-validation \
             -var managed_image_name=validation-only \
             -var build_source_cidr=203.0.113.10/32 \
+            -var allow_temporary_batch_logon_assignment=true \
             windows-runner.pkr.hcl 2>&1); then
             echo "Windows build unexpectedly accepted the certificate exception without opt-in"
             exit 1
