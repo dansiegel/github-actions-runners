@@ -163,6 +163,152 @@ function Test-WindowsImageAccountCleanup {
 }
 Test-WindowsImageAccountCleanup
 
+
+function Test-WindowsFinalizationAttempt {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('runner-finalization-test-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root | Out-Null
+    try {
+        $source = Join-Path $root 'source.ps1'
+        [IO.File]::WriteAllText($source, '# fixture')
+        $sha = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        $attempt = '11111111-1111-1111-1111-111111111111'
+        foreach ($bad in @(@{ attempt = 'invalid'; sha = $sha }, @{ attempt = $attempt; sha = ('0' * 64) })) {
+            $rejected = $false
+            try { Start-WindowsImageFinalizationAttempt -Root $root -Attempt $bad.attempt -SourceSHA256 $bad.sha -SourcePath $source } catch { $rejected = $true }
+            if (-not $rejected -or (Test-Path (Join-Path $root 'image-finalization.started.json'))) { throw 'Unverified source acquired a finalization attempt' }
+        }
+        Start-WindowsImageFinalizationAttempt -Root $root -Attempt $attempt -SourceSHA256 $sha -SourcePath $source
+        foreach ($replay in @($attempt, '22222222-2222-2222-2222-222222222222')) {
+            $rejected = $false
+            try { Start-WindowsImageFinalizationAttempt -Root $root -Attempt $replay -SourceSHA256 $sha -SourcePath $source } catch { $rejected = $true }
+            if (-not $rejected) { throw 'A second finalizer could repeat Sysprep' }
+        }
+        $record = @{ attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded' }
+        $record.attemptId = '22222222-2222-2222-2222-222222222222'
+        $rejected = $false
+        try { Complete-WindowsImageFinalizationAttempt -Root $root -Record $record } catch { $rejected = $true }
+        if (-not $rejected -or (Test-Path (Join-Path $root 'image-finalization.complete.json'))) { throw 'Foreign attempt published completion' }
+        $record.attemptId = $attempt
+        Complete-WindowsImageFinalizationAttempt -Root $root -Record $record
+        $saved = Get-Content -LiteralPath (Join-Path $root 'image-finalization.complete.json') -Raw | ConvertFrom-Json
+        if ($saved.attemptId -cne $attempt -or $saved.scriptSHA256 -cne $sha) { throw 'Completion metadata changed' }
+        $rejected = $false
+        try { Complete-WindowsImageFinalizationAttempt -Root $root -Record $record } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Finalization completion was overwritten' }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+    Write-Output 'Finalization source pin, atomic one-shot marker, replay rejection, and completion publication tests passed.'
+}
+Test-WindowsFinalizationAttempt
+
+function Test-WindowsManagedFinalization {
+    . (Join-Path $PSScriptRoot 'Invoke-WindowsImageFinalization.ps1')
+    $subscription = '00000000-0000-0000-0000-000000000000'
+    $attempt = '11111111-1111-1111-1111-111111111111'
+    $sha = 'a' * 64
+    $vmId = "/subscriptions/$subscription/resourceGroups/packer-fixture/providers/Microsoft.Compute/virtualMachines/pkrvmfixture"
+    $proof = @{ schemaVersion = 1; attemptId = $attempt; scriptSHA256 = $sha; status = 'Succeeded'; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; buildAccountRetired = $true; privateKeyAbsent = $true; certificateAbsent = $true; winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true }
+    $state = @{}
+    function Get-WindowsFinalizationTime { return $state.now }
+    function Wait-WindowsFinalizationPoll { $state.now = $state.now.AddSeconds(60) }
+    function Throw-TestAzureStatus {
+        param([int] $Status)
+        $error = [InvalidOperationException]::new('Simulated Azure response')
+        $error.Data['StatusCode'] = $Status
+        throw $error
+    }
+    function New-TestCommand {
+        return [pscustomobject]@{
+            tags = [pscustomobject]@{ 'finalization-attempt' = $attempt; 'finalizer-sha256' = $sha }
+            properties = [pscustomobject]@{
+                provisioningState = 'Succeeded'
+                instanceView = [pscustomobject]@{ executionState = 'Succeeded'; exitCode = 0; output = ('GHA_IMAGE_FINALIZATION ' + ($proof | ConvertTo-Json -Compress)) }
+            }
+        }
+    }
+    function Invoke-WindowsImageRest {
+        param($Method, $Uri, $Body)
+        if ($Uri -like '*/permissions?*') {
+            if ($state.scenario -eq 'denied-permission-read') { Throw-TestAzureStatus 403 }
+            $notActions = @()
+            if ($state.scenario -eq 'missing-permission') { $notActions = @('Microsoft.Compute/virtualMachines/runCommands/write') }
+            return [pscustomobject]@{ value = @([pscustomobject]@{ actions = @('Microsoft.Compute/*'); notActions = $notActions }) }
+        }
+        if ($Uri -notlike '*/runCommands/*') {
+            if ($Method -ne 'GET' -or $Uri -notlike "https://management.azure.com$vmId`?*") { throw 'Unexpected finalizer target' }
+            return [pscustomobject]@{ id = $vmId; location = 'eastus2'; tags = [pscustomobject]@{ 'managed-by' = 'packer'; project = $(if ($state.scenario -eq 'foreign-vm') { 'other' } else { 'github-actions-runners' }) }; properties = [pscustomobject]@{ storageProfile = [pscustomobject]@{ osDisk = [pscustomobject]@{ osType = 'Windows' } } } }
+        }
+        switch ($Method) {
+            'PUT' {
+                $state.puts++
+                if ($state.puts -ne 1) { throw 'Finalization was resubmitted' }
+                if (-not $Body.properties.asyncExecution -or $Body.properties.timeoutInSeconds -ne 1200 -or -not $Body.properties.treatFailureAsDeploymentFailure -or $Body.properties.ContainsKey('runAsPassword') -or $Body.properties.ContainsKey('outputBlobUri')) { throw 'Unexpected managed command execution or credential contract' }
+                if ($Body.properties.source.script -notmatch 'Get-FileHash' -or $Body.properties.source.script -notmatch [regex]::Escape($sha)) { throw 'Guest finalizer source is not pinned' }
+                if ($state.scenario -eq 'put-denied') { Throw-TestAzureStatus 403 }
+                if ($state.scenario -ne 'put-missing') { $state.exists = $true }
+                if ($state.scenario -in @('put-uncertain', 'put-missing')) { Throw-TestAzureStatus 0 }
+                return
+            }
+            'DELETE' {
+                $state.deletes++
+                if ($state.scenario -ne 'delete-no-op') { $state.exists = $false }
+                if ($state.scenario -eq 'delete-uncertain') { Throw-TestAzureStatus 0 }
+                return
+            }
+            'GET' {
+                if (-not $state.exists) { Throw-TestAzureStatus 404 }
+                $command = New-TestCommand
+                if ($state.scenario -eq 'foreign-command') { $command.tags.'finalization-attempt' = 'unrelated' }
+                if ($Uri -like '*$expand=instanceView') {
+                    $state.polls++
+                    if ($state.scenario -eq 'throttled-read' -and $state.polls -eq 1) { Throw-TestAzureStatus 429 }
+                    if ($state.scenario -in @('timeout', 'running-then-success') -and ($state.scenario -eq 'timeout' -or $state.polls -lt 3)) { $command.properties.instanceView.executionState = 'Running' }
+                    if ($state.scenario -eq 'failed-command') { $command.properties.instanceView.executionState = 'Failed'; $command.properties.instanceView.exitCode = 1 }
+                    if ($state.scenario -eq 'bad-proof') { $command.properties.instanceView.output = '' }
+                }
+                return $command
+            }
+            default { throw 'Unexpected finalizer method' }
+        }
+    }
+    foreach ($scenario in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command', 'put-denied', 'put-missing', 'timeout', 'failed-command', 'bad-proof', 'delete-no-op')) {
+        $state.Clear()
+        $state.scenario = $scenario; $state.now = [DateTime]::UtcNow; $state.puts = 0; $state.deletes = 0; $state.polls = 0; $state.exists = $scenario -in @('existing', 'foreign-command')
+        $rejected = $false
+        try { $result = Invoke-WindowsImageFinalization -Subscription $subscription -Group 'packer-fixture' -VM 'pkrvmfixture' -Region 'eastus2' -SourceSHA256 $sha -Attempt $attempt } catch { $rejected = $true }
+        $success = $scenario -in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain')
+        if ($rejected -eq $success) { throw "Unexpected managed finalization result: $scenario" }
+        $expectedPuts = $(if ($scenario -in @('existing', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command')) { 0 } else { 1 })
+        if ($state.puts -ne $expectedPuts) { throw "Managed command submission count changed: $scenario" }
+        if ($success -and ($state.exists -or $state.deletes -ne 1 -or $result.attemptId -cne $attempt)) { throw "Capture accepted unconfirmed cleanup: $scenario" }
+        if ($scenario -eq 'foreign-command' -and $state.deletes) { throw 'Deleted an unrelated command' }
+        if ($scenario -eq 'timeout' -and ($state.deletes -ne 1 -or $state.exists)) { throw 'Timed-out command was not cancelled and removed' }
+    }
+    foreach ($scenario in @('nonzero', 'no-exit', 'running', 'bad-attempt', 'bad-sha', 'bad-sysprep', 'false-key', 'string-bool', 'missing-field', 'empty-output', 'duplicate-proof')) {
+        $command = New-TestCommand
+        $record = $proof | ConvertTo-Json | ConvertFrom-Json
+        switch ($scenario) {
+            'nonzero' { $command.properties.instanceView.exitCode = 1 }
+            'no-exit' { $command.properties.instanceView.PSObject.Properties.Remove('exitCode') }
+            'running' { $command.properties.instanceView.executionState = 'Running' }
+            'bad-attempt' { $record.attemptId = 'other' }
+            'bad-sha' { $record.scriptSHA256 = 'b' * 64 }
+            'bad-sysprep' { $record.sysprepState = 'IMAGE_STATE_COMPLETE' }
+            'false-key' { $record.privateKeyAbsent = $false }
+            'string-bool' { $record.privateKeyAbsent = 'true' }
+            'missing-field' { $record.PSObject.Properties.Remove('privateKeyAbsent') }
+        }
+        $command.properties.instanceView.output = 'GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Compress)
+        if ($scenario -eq 'empty-output') { $command.properties.instanceView.output = '' }
+        if ($scenario -eq 'duplicate-proof') { $command.properties.instanceView.output += "`n" + $command.properties.instanceView.output }
+        $rejected = $false
+        try { Read-WindowsFinalizationProof -Command $command -ExpectedAttempt $attempt -ExpectedSHA256 $sha | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw "Unverified managed-command proof accepted: $scenario" }
+    }
+    Write-Output 'Managed finalization permissions, single submission, uncertain response, polling, proof, timeout, and cleanup tests passed.'
+}
+Test-WindowsManagedFinalization
+
 function Test-WindowsImageCertificateCleanup {
     . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
     $state = @{ provider = $true; file = $true; certificate = $true; scenario = ''; calls = [Collections.Generic.List[string]]::new() }

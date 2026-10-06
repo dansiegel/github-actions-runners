@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([string] $AttemptId, [string] $ExpectedScriptSHA256)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -139,10 +139,41 @@ function Remove-WindowsImageBuildCertificate {
     return @{ privateKeyAbsent = $true; certificateAbsent = $true }
 }
 
-# Tests load only the account-cleanup functions, without preparing the host.
+function Start-WindowsImageFinalizationAttempt {
+    param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
+    if ($Attempt -cnotmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' -or $SourceSHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid finalization identity' }
+    if ((Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $SourceSHA256) { throw 'Finalizer source changed after staging' }
+    # CreateNew is atomic. Even a failed attempt keeps this marker, so neither a
+    # replay nor another command identity can run Sysprep twice on this builder.
+    $stream = [IO.File]::Open((Join-Path $Root 'image-finalization.started.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes((@{ attemptId = $Attempt; scriptSHA256 = $SourceSHA256 } | ConvertTo-Json -Compress))
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    } finally { $stream.Dispose() }
+}
+
+function Complete-WindowsImageFinalizationAttempt {
+    param([string] $Root, $Record)
+    $started = Get-Content -LiteralPath (Join-Path $Root 'image-finalization.started.json') -Raw | ConvertFrom-Json
+    if ($started.attemptId -cne $Record.attemptId -or $started.scriptSHA256 -cne $Record.scriptSHA256 -or $Record.status -cne 'Succeeded') { throw 'Finalization completion does not match its one-shot attempt' }
+    $pending = Join-Path $Root 'image-finalization.pending.json'
+    $stream = [IO.File]::Open($pending, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($Record | ConvertTo-Json -Depth 5 -Compress))
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    } finally { $stream.Dispose() }
+    # Same-volume atomic publication; never replace an existing completion.
+    [IO.File]::Move($pending, (Join-Path $Root 'image-finalization.complete.json'))
+}
+
+# Tests load only functions, without preparing the host.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $stateRoot = "$env:ProgramData\GitHubRunner"
+Start-WindowsImageFinalizationAttempt -Root $stateRoot -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath
+Write-Output 'Finalization phase: image-preflight'
 $runnerRoot = "$env:SystemDrive\actions-runner"
 $manifest = Get-Content -LiteralPath (Join-Path $stateRoot 'manifest.json') -Raw | ConvertFrom-Json
 foreach ($probe in @(
@@ -174,6 +205,7 @@ $buildCertificate = Get-WindowsImageBuildCertificate
 foreach ($service in Get-Service -Name RdAgent, WindowsAzureGuestAgent -ErrorAction Stop) {
     if ($service.Status -ne 'Running') { throw "Azure guest agent is not ready: $($service.Name)" }
 }
+Write-Output 'Finalization phase: sysprep'
 & "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /quit /mode:vm
 if ($LASTEXITCODE -ne 0) { throw 'Sysprep failed' }
 $deadline = [DateTime]::UtcNow.AddMinutes(15)
@@ -183,9 +215,11 @@ while ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\
 }
 # Remove the recorded build key before changing the account context. Sysprep can
 # change key availability; no missing-key or access error is assumed successful.
+Write-Output 'Finalization phase: certificate-cleanup'
 $certificateCleanup = Remove-WindowsImageBuildCertificate -Identity $buildCertificate
 # Retire the identity only after Sysprep polling, before the final command exits.
-# The Packer communicator must still receive success; disconnects remain fatal.
+# The managed command uses the VM agent, independently of the retired account.
+Write-Output 'Finalization phase: account-cleanup'
 $accountCleanup = Remove-WindowsImageBuildAccount -Expected $buildAccount
 Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
 $manifest | Add-Member -NotePropertyName imageAccountCleanup -NotePropertyValue @{ mode = $accountCleanup.mode; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; serverSysprepCompleted = $true; buildAccountAbsent = $true } -Force
@@ -193,9 +227,23 @@ $manifest | Add-Member -NotePropertyName imageCertificateCleanup -NotePropertyVa
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stateRoot 'manifest.json')
 Write-Host "Image build account retired; mode: $($accountCleanup.mode); Server Sysprep completed."
 
-# No later remote cleanup command is needed, but the current WinRM command must
-# still return successfully. A disconnect remains fatal to the Packer build.
-Get-ChildItem WSMan:\localhost\Listener | Remove-Item -Recurse -Force
-Get-NetFirewallRule -Name 'WINRM-Packer-Build' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# Completion travels over the VM agent, so retiring WinRM cannot acknowledge
+# success accidentally. Every readback must succeed before publishing proof.
+Write-Output 'Finalization phase: remoting-cleanup'
+Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop | Remove-Item -Recurse -Force -ErrorAction Stop
+Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build' | Remove-NetFirewallRule -ErrorAction Stop
 New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 0 -Force | Out-Null
+if (@(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop).Count) { throw 'Build WinRM listener remains' }
+if (@(Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build').Count) { throw 'Build firewall rule remains' }
+if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).LocalAccountTokenFilterPolicy -ne 0) { throw 'Build token policy was not restored' }
+$runtimeTask = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop
+if ($runtimeTask.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $runtimeTask.State -eq 'Disabled') { throw 'Runtime SYSTEM startup task is missing or disabled' }
+$generalizationState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
+Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState $generalizationState
 Remove-Item -LiteralPath $PSCommandPath -Force
+Complete-WindowsImageFinalizationAttempt -Root $stateRoot -Record @{
+    schemaVersion = 1; attemptId = $AttemptId; scriptSHA256 = $ExpectedScriptSHA256; status = 'Succeeded'
+    sysprepState = $generalizationState; buildAccountRetired = $true
+    privateKeyAbsent = $certificateCleanup.privateKeyAbsent; certificateAbsent = $certificateCleanup.certificateAbsent
+    winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true
+}

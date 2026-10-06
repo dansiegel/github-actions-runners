@@ -103,8 +103,24 @@ build {
   provisioner "windows-restart" {
     restart_timeout = "15m"
   }
-  provisioner "powershell" {
-    script     = "${path.root}/scripts/Complete-WindowsRunnerImage.ps1"
-    skip_clean = true
+  provisioner "file" {
+    source      = "${path.root}/scripts/Complete-WindowsRunnerImage.ps1"
+    destination = "C:/Windows/Temp/Complete-WindowsRunnerImage.ps1"
+  }
+  # Generalization retires WinRM itself. Observe completion through the existing
+  # VM agent and operator Azure login, without another WinRM authentication.
+  provisioner "shell-local" {
+    script      = "${path.root}/scripts/Invoke-WindowsImageFinalization.ps1"
+    max_retries = 0
+    timeout     = "25m"
+    execute_command = [
+      "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", "{{.Script}}",
+      "-SubscriptionId", var.subscription_id,
+      "-ResourceGroupName", build.TempResourceGroupName,
+      "-VmName", build.TempComputeName,
+      "-Location", var.location,
+      "-FinalizerSHA256", filesha256("${path.root}/scripts/Complete-WindowsRunnerImage.ps1"),
+      "-AttemptId", build.PackerRunUUID
+    ]
   }
 }
