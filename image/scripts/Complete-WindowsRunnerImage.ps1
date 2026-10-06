@@ -153,6 +153,72 @@ function Start-WindowsImageFinalizationAttempt {
     } finally { $stream.Dispose() }
 }
 
+
+function Get-WindowsFinalizationTaskProperty {
+    param($Object, [string] $Name)
+    if ($null -ne $Object) {
+        $property = $Object.PSObject.Properties[$Name]
+        if ($null -ne $property) { return $property.Value }
+    }
+}
+
+function Resolve-WindowsFinalizationTaskSID {
+    param([string] $UserId)
+    if ([string]::IsNullOrWhiteSpace($UserId)) { throw 'Principal.UserId is empty' }
+    if ($UserId -cmatch '^S-1-\d+(-\d+)+$') { return ([Security.Principal.SecurityIdentifier]::new($UserId)).Value }
+    # Task Scheduler can return an account name even when registered with a SID.
+    # Resolve through Windows and compare the immutable SID, never the name.
+    return ([Security.Principal.NTAccount]::new($UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Format-WindowsFinalizationTaskValue {
+    param($Value)
+    if ($null -eq $Value) { return '<missing>' }
+    $text = [string]$Value
+    # Only bounded enum/duration/number values enter diagnostics. Never include
+    # action arguments, arbitrary paths, account names, or raw task XML.
+    $knownEnum = $text -in @('S4U', 'Password', 'InteractiveToken', 'ServiceAccount', 'Highest', 'HighestAvailable', 'Limited', 'LeastPrivilege', 'IgnoreNew', 'Parallel', 'Queue', 'StopExisting', 'True', 'False')
+    if ($text.Length -gt 64 -or (-not $knownEnum -and $text -cnotmatch '^-?\d+$' -and $text -cnotmatch '^P[0-9TYMDHS.+-]+$')) { $text = '<unrecognized>' }
+    return "$text [$($Value.GetType().Name)]"
+}
+
+function Assert-WindowsImageFinalizationTask {
+    param($Task, [string] $ExpectedSID, [string] $SourcePath, [string] $Attempt, [string] $SourceSHA256)
+    $issues = [Collections.Generic.List[string]]::new()
+    $principal = Get-WindowsFinalizationTaskProperty $Task 'Principal'
+    $settings = Get-WindowsFinalizationTaskProperty $Task 'Settings'
+    $principalSID = $null
+    try { $principalSID = Resolve-WindowsFinalizationTaskSID -UserId (Get-WindowsFinalizationTaskProperty $principal 'UserId') }
+    catch { $issues.Add('Principal.UserId cannot be resolved to a SID') }
+    if ([string]::IsNullOrWhiteSpace($principalSID) -and -not $issues.Count) { $issues.Add('Principal.UserId did not resolve to a SID') }
+    if ($null -ne $principalSID -and $principalSID -cne $ExpectedSID) { $issues.Add('Principal.UserId resolves to a different SID') }
+    $logon = Get-WindowsFinalizationTaskProperty $principal 'LogonType'
+    if ([string]$logon -notin @('S4U', '2')) { $issues.Add('Principal.LogonType expected S4U/2; actual ' + (Format-WindowsFinalizationTaskValue $logon)) }
+    $level = Get-WindowsFinalizationTaskProperty $principal 'RunLevel'
+    if ([string]$level -notin @('Highest', 'HighestAvailable', '1')) { $issues.Add('Principal.RunLevel expected highest/1; actual ' + (Format-WindowsFinalizationTaskValue $level)) }
+    $actions = @((Get-WindowsFinalizationTaskProperty $Task 'Actions') | Where-Object { $null -ne $_ })
+    if ($actions.Count -ne 1) { $issues.Add("Actions.Count expected 1; actual $($actions.Count)") }
+    else {
+        if ((Get-WindowsFinalizationTaskProperty $actions[0] 'Execute') -ine "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe") { $issues.Add('Actions.Execute differs from the pinned PowerShell path') }
+        $arguments = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
+        if ((Get-WindowsFinalizationTaskProperty $actions[0] 'Arguments') -cne $arguments) { $issues.Add('Actions.Arguments differs from the exact attempt/source command') }
+    }
+    $triggers = @((Get-WindowsFinalizationTaskProperty $Task 'Triggers') | Where-Object { $null -ne $_ })
+    if ($triggers.Count) { $issues.Add("Triggers.Count expected 0; actual $($triggers.Count)") }
+    $limit = Get-WindowsFinalizationTaskProperty $settings 'ExecutionTimeLimit'
+    $duration = $null
+    try { $duration = [Xml.XmlConvert]::ToTimeSpan([string]$limit) } catch { }
+    if ($null -eq $duration -or $duration -ne [TimeSpan]::FromMinutes(18)) { $issues.Add('Settings.ExecutionTimeLimit expected exactly 18 minutes; actual ' + (Format-WindowsFinalizationTaskValue $limit)) }
+    $instances = Get-WindowsFinalizationTaskProperty $settings 'MultipleInstances'
+    if ([string]$instances -notin @('IgnoreNew', '2')) { $issues.Add('Settings.MultipleInstances expected IgnoreNew/2; actual ' + (Format-WindowsFinalizationTaskValue $instances)) }
+    $restart = Get-WindowsFinalizationTaskProperty $settings 'RestartCount'
+    if ($null -eq $restart -or [string]$restart -cne '0') { $issues.Add('Settings.RestartCount expected 0; actual ' + (Format-WindowsFinalizationTaskValue $restart)) }
+    $terminate = Get-WindowsFinalizationTaskProperty $settings 'AllowHardTerminate'
+    if ($terminate -isnot [bool] -or -not $terminate) { $issues.Add('Settings.AllowHardTerminate expected Boolean true; actual ' + (Format-WindowsFinalizationTaskValue $terminate)) }
+    if ($issues.Count) { throw ('Finalization task mismatch: ' + ($issues -join '; ')) }
+    return $principalSID
+}
+
 function Register-WindowsImageFinalizationTask {
     param([string] $Attempt, [string] $SourceSHA256, [string] $SourcePath, [switch] $AllowTemporaryBatchLogonAssignment)
     if (-not $AllowTemporaryBatchLogonAssignment) { throw 'Approve the possible temporary own-account batch-logon assignment before registering this task' }
@@ -178,7 +244,7 @@ function Register-WindowsImageFinalizationTask {
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop | Out-Null
     }
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if ($task.Principal.UserId -cne $account.sid -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine $executable -or $task.Actions[0].Arguments -cne $arguments -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M' -or [string]$task.Settings.MultipleInstances -notin @('IgnoreNew', '2') -or $task.Settings.RestartCount -ne 0 -or -not $task.Settings.AllowHardTerminate) { throw 'Finalization task does not match the staged administrator action' }
+    $null = Assert-WindowsImageFinalizationTask -Task $task -ExpectedSID $account.sid -SourcePath $SourcePath -Attempt $Attempt -SourceSHA256 $SourceSHA256
     Assert-WindowsBatchLogonDelta -Baseline (Read-WindowsBatchLogonBaseline -Root "$env:ProgramData\GitHubRunner" -Attempt $Attempt -SourceSHA256 $SourceSHA256) -Current (Get-WindowsBatchLogonPolicy)
     Write-Output "Staged independent administrator finalization task for attempt $Attempt; not started."
 }
@@ -337,10 +403,9 @@ function Wait-WindowsImageFinalizationTask {
     param([string] $Root, [string] $Attempt, [string] $SourceSHA256, [string] $SourcePath)
     if (-not (Get-WindowsFinalizationIdentity).IsSystem) { throw 'Managed observer must use the Azure agent identity' }
     $taskName = 'GitHubRunnerImageFinalize-' + $Attempt.Replace('-', '')
-    $expectedAction = "-NoLogo -NoProfile -NonInteractive -File `"$SourcePath`" -AttemptId $Attempt -ExpectedScriptSHA256 $SourceSHA256"
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    if ($task.Principal.UserId -cnotmatch '^S-1-5-21-\d+-\d+-\d+-(500|[1-9]\d{3,})$' -or $task.Principal.LogonType -ne 'S4U' -or $task.Principal.RunLevel -ne 'Highest' -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ine "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -or $task.Actions[0].Arguments -cne $expectedAction -or @($task.Triggers | Where-Object { $null -ne $_ }).Count -or $task.Settings.ExecutionTimeLimit -ne 'PT18M' -or [string]$task.Settings.MultipleInstances -notin @('IgnoreNew', '2') -or $task.Settings.RestartCount -ne 0 -or -not $task.Settings.AllowHardTerminate) { throw 'Refusing an unrelated or unbounded finalization task' }
-    $principalSID = $task.Principal.UserId
+    $baseline = Read-WindowsBatchLogonBaseline -Root $Root -Attempt $Attempt -SourceSHA256 $SourceSHA256
+    $principalSID = Assert-WindowsImageFinalizationTask -Task $task -ExpectedSID $baseline.sid -SourcePath $SourcePath -Attempt $Attempt -SourceSHA256 $SourceSHA256
     $dispatchPath = Join-Path $Root 'image-finalization.dispatched.json'
     $completedPath = Join-Path $Root 'image-finalization.complete.json'
     $observedPath = Join-Path $Root 'image-finalization.observed.json'

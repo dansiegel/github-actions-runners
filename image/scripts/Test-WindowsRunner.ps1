@@ -261,6 +261,79 @@ function Test-WindowsBatchPolicyRestoration {
 }
 Test-WindowsBatchPolicyRestoration
 
+
+function Test-WindowsTaskDefinitionReadback {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $expectedSID = $identity.User.Value
+    $source = 'C:\Windows\Temp\Complete-WindowsRunnerImage.ps1'
+    $attempt = '11111111-1111-1111-1111-111111111111'; $sha = 'a' * 64
+    $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = "-NoLogo -NoProfile -NonInteractive -File `"$source`" -AttemptId $attempt -ExpectedScriptSHA256 $sha"
+    function New-TestTaskDefinition {
+        return [pscustomobject]@{ Principal = [pscustomobject]@{ UserId = $expectedSID; LogonType = 'S4U'; RunLevel = 'Highest' }; Actions = @([pscustomobject]@{ Execute = $executable; Arguments = $arguments }); Triggers = $null; Settings = [pscustomobject]@{ ExecutionTimeLimit = 'PT18M'; MultipleInstances = 'IgnoreNew'; RestartCount = 0; AllowHardTerminate = $true } }
+    }
+    # Construct real CIM definitions in memory. These cmdlets do not register,
+    # start, change, or delete any host task or policy.
+    $definition = [pscustomobject]@{
+        Principal = New-ScheduledTaskPrincipal -UserId $expectedSID -LogonType S4U -RunLevel Highest
+        Actions = @(New-ScheduledTaskAction -Execute $executable -Argument $arguments)
+        Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMinutes(18)) -MultipleInstances IgnoreNew
+        Triggers = $null
+    }
+    $resolved = Assert-WindowsImageFinalizationTask -Task $definition -ExpectedSID $expectedSID -SourcePath $source -Attempt $attempt -SourceSHA256 $sha
+    if ($resolved -cne $expectedSID) { throw 'CIM definition did not retain the exact principal SID' }
+    foreach ($scenario in @('sid', 'account-name', 'numeric-enums', 'xml-runlevel', 'expanded-duration', 'seconds-duration')) {
+        $definition = New-TestTaskDefinition
+        switch ($scenario) {
+            'account-name' { $definition.Principal.UserId = $identity.Name }
+            'numeric-enums' { $definition.Principal.LogonType = [uint32]2; $definition.Principal.RunLevel = [uint32]1; $definition.Settings.MultipleInstances = [uint32]2 }
+            'xml-runlevel' { $definition.Principal.RunLevel = 'HighestAvailable' }
+            'expanded-duration' { $definition.Settings.ExecutionTimeLimit = 'P0DT0H18M0S' }
+            'seconds-duration' { $definition.Settings.ExecutionTimeLimit = 'PT1080S' }
+        }
+        $resolved = Assert-WindowsImageFinalizationTask -Task $definition -ExpectedSID $expectedSID -SourcePath $source -Attempt $attempt -SourceSHA256 $sha
+        if ($resolved -cne $expectedSID) { throw "Definition normalization changed identity: $scenario" }
+    }
+    $cases = @{
+        'wrong-sid' = 'Principal.UserId'; 'missing-user' = 'Principal.UserId'; 'password-logon' = 'Principal.LogonType'
+        'least-privilege' = 'Principal.RunLevel'; 'missing-actions' = 'Actions.Count'; 'extra-action' = 'Actions.Count'
+        'wrong-executable' = 'Actions.Execute'; 'wrong-arguments' = 'Actions.Arguments'; 'trigger' = 'Triggers.Count'
+        'unbounded' = 'Settings.ExecutionTimeLimit'; 'longer' = 'Settings.ExecutionTimeLimit'; 'invalid-duration' = 'Settings.ExecutionTimeLimit'
+        'restart' = 'Settings.RestartCount'; 'missing-restart' = 'Settings.RestartCount'; 'parallel' = 'Settings.MultipleInstances'
+        'no-hard-terminate' = 'Settings.AllowHardTerminate'; 'string-boolean' = 'Settings.AllowHardTerminate'; 'unknown-enum' = 'Principal.LogonType'
+    }
+    foreach ($scenario in $cases.Keys) {
+        $definition = New-TestTaskDefinition
+        switch ($scenario) {
+            'wrong-sid' { $definition.Principal.UserId = 'S-1-5-21-1-2-3-1001' }
+            'missing-user' { $definition.Principal.PSObject.Properties.Remove('UserId') }
+            'password-logon' { $definition.Principal.LogonType = [uint32]1 }
+            'least-privilege' { $definition.Principal.RunLevel = [uint32]0 }
+            'missing-actions' { $definition.Actions = @() }
+            'extra-action' { $definition.Actions += $definition.Actions[0] }
+            'wrong-executable' { $definition.Actions[0].Execute = 'C:\DIAGNOSTIC_SECRET_CANARY\other.exe' }
+            'wrong-arguments' { $definition.Actions[0].Arguments = 'DIAGNOSTIC_SECRET_CANARY' }
+            'trigger' { $definition.Triggers = @('trigger') }
+            'unbounded' { $definition.Settings.ExecutionTimeLimit = 'PT0S' }
+            'longer' { $definition.Settings.ExecutionTimeLimit = 'PT18M1S' }
+            'invalid-duration' { $definition.Settings.ExecutionTimeLimit = 'DIAGNOSTIC_SECRET_CANARY /not-a-duration' }
+            'restart' { $definition.Settings.RestartCount = 1 }
+            'missing-restart' { $definition.Settings.PSObject.Properties.Remove('RestartCount') }
+            'parallel' { $definition.Settings.MultipleInstances = [uint32]0 }
+            'no-hard-terminate' { $definition.Settings.AllowHardTerminate = $false }
+            'string-boolean' { $definition.Settings.AllowHardTerminate = 'false' }
+            'unknown-enum' { $definition.Principal.LogonType = 'DIAGNOSTIC_SECRET_CANARY' }
+        }
+        $errorMessage = ''
+        try { Assert-WindowsImageFinalizationTask -Task $definition -ExpectedSID $expectedSID -SourcePath $source -Attempt $attempt -SourceSHA256 $sha | Out-Null } catch { $errorMessage = $_.Exception.Message }
+        if (-not $errorMessage.Contains($cases[$scenario])) { throw "Task mismatch did not identify its field: $scenario" }
+        if ($errorMessage.Contains('DIAGNOSTIC_SECRET_CANARY')) { throw 'Task diagnostics disclosed arbitrary task content' }
+    }
+    Write-Output 'Real in-memory Task Scheduler CIM definitions, SID/name and enum/duration normalization, exact action checks, and bounded mismatch diagnostics passed.'
+}
+Test-WindowsTaskDefinitionReadback
+
 function Test-WindowsAdministratorFinalization {
     . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
     $fixture = @{ scenario = ''; sid = 'S-1-5-21-1-2-3-500'; sha = ('a' * 64); attempt = '11111111-1111-1111-1111-111111111111'; system = $false; elevated = $true; exists = $false; runs = 0; ran = $false; registrations = 0; now = [DateTime]::UtcNow }
