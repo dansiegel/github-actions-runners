@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    branches: [master, feature/shared-runner-profiles]
   workflow_dispatch:
 
 permissions:
@@ -58,6 +58,52 @@ jobs:
               -var managed_image_name=validation-only \
               runner.pkr.hcl
 
+      - name: Validate Windows Packer image (no Azure build)
+        run: |
+          docker run --rm \
+            -v "$PWD/image:/workspace" \
+            -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
+            -w /workspace hashicorp/packer:1.15.4 init windows-runner.pkr.hcl
+          if default_validation=$(docker run --rm \
+            -v "$PWD/image:/workspace" \
+            -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
+            -w /workspace hashicorp/packer:1.15.4 validate \
+            -var subscription_id=00000000-0000-0000-0000-000000000000 \
+            -var resource_group_name=gha-runners-validation \
+            -var managed_image_name=validation-only \
+            -var build_source_cidr=203.0.113.10/32 \
+            -var allow_temporary_batch_logon_assignment=true \
+            windows-runner.pkr.hcl 2>&1); then
+            echo "Windows build unexpectedly accepted the certificate exception without opt-in"
+            exit 1
+          fi
+          [[ "$default_validation" == *"allow_unverified_winrm_certificate"* ]]
+          if batch_validation=$(docker run --rm \
+            -v "$PWD/image:/workspace" \
+            -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
+            -w /workspace hashicorp/packer:1.15.4 validate \
+            -var subscription_id=00000000-0000-0000-0000-000000000000 \
+            -var resource_group_name=gha-runners-validation \
+            -var managed_image_name=validation-only \
+            -var build_source_cidr=203.0.113.10/32 \
+            -var allow_unverified_winrm_certificate=true \
+            windows-runner.pkr.hcl 2>&1); then
+            echo "Windows build unexpectedly accepted batch-logon assignment without opt-in"
+            exit 1
+          fi
+          [[ "$batch_validation" == *"allow_temporary_batch_logon_assignment"* ]]
+          docker run --rm \
+            -v "$PWD/image:/workspace" \
+            -v "$RUNNER_TEMP/packer-config:/root/.config/packer" \
+            -w /workspace hashicorp/packer:1.15.4 validate \
+            -var subscription_id=00000000-0000-0000-0000-000000000000 \
+            -var resource_group_name=gha-runners-validation \
+            -var managed_image_name=validation-only \
+            -var build_source_cidr=203.0.113.10/32 \
+            -var allow_unverified_winrm_certificate=true \
+            -var allow_temporary_batch_logon_assignment=true \
+            windows-runner.pkr.hcl
+
       - name: Syntax-check scripts
         run: |
           bash -n scripts/deploy-azure.sh
@@ -86,3 +132,22 @@ jobs:
 
       - name: Verify pool capacity, enablement, and disk tiers
         run: pwsh -NoProfile -File scripts/Test-RunnerDiskTier.ps1
+
+  windows-bootstrap:
+    name: validate Windows bootstrap without provisioning
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+      - name: Parse Windows image scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem image/scripts/*Windows*.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
+      - name: Test one-shot Windows bootstrap and credential cleanup
+        shell: powershell
+        run: ./image/scripts/Test-WindowsRunner.ps1

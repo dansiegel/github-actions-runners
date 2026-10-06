@@ -68,7 +68,7 @@ function Get-NormalizedRunnerPools {
             throw 'Each runner pool must be a JSON object'
         }
         foreach ($property in $pool.PSObject.Properties.Name) {
-            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId')) {
+            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId', 'osType')) {
                 throw "Unknown runner pool configuration field: $property"
             }
         }
@@ -102,6 +102,14 @@ function Get-NormalizedRunnerPools {
             throw "Runner pool '$name' imageId must be a string"
         }
 
+        $hasOSType = $null -ne $pool.PSObject.Properties['osType']
+        if ($hasOSType -and ($pool.osType -isnot [string] -or $pool.osType -cnotin @('Linux', 'Windows'))) {
+            throw "Runner pool '$name' osType must be Linux or Windows"
+        }
+        if ($pool.osType -ceq 'Windows' -and $pool.enabled -ne $false -and [string]::IsNullOrWhiteSpace([string] $pool.imageId)) {
+            throw "Enabled Windows pool '$name' requires an explicit qualified imageId"
+        }
+
         $priority = if ($null -eq $pool.priority -or [string]::IsNullOrWhiteSpace([string] $pool.priority)) { 'Regular' } else { ([string] $pool.priority).Trim() }
         if ($priority -notin @('Regular', 'Spot')) {
             throw "Runner pool '$name' priority must be Regular or Spot"
@@ -114,9 +122,17 @@ function Get-NormalizedRunnerPools {
 
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
+        $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+        $profileLabelCount = 0
         foreach ($label in $labels) {
-            if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            if ($label -in @('Linux', 'Windows', 'macOS')) {
+                if ($label -ine $osLabel) { throw "Runner OS label '$label' conflicts with osType $osLabel" }
+            } else {
+                $profileLabelCount++
+                if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            }
         }
+        if ($profileLabelCount -eq 0) { throw 'Runner labels require a profile label in addition to the operating system' }
         $normalizedPool = [ordered]@{
             name       = $name
             vmSize     = $vmSize
@@ -127,6 +143,7 @@ function Get-NormalizedRunnerPools {
         if ($hasMaxRunners) { $normalizedPool.maxRunners = [int] $pool.maxRunners }
         if ($hasEnabled) { $normalizedPool.enabled = $pool.enabled }
         if ($hasImageId) { $normalizedPool.imageId = $pool.imageId.Trim() }
+        if ($hasOSType) { $normalizedPool.osType = $pool.osType }
         $normalized += $normalizedPool
     }
     if (@($normalized | Where-Object { $_.enabled -ne $false }).Count -eq 0) {
@@ -149,10 +166,13 @@ Write-Host 'Runner pools:'
 foreach ($pool in $runnerPools) {
     $capacity = if ($pool.enabled -eq $false) { 'disabled' } elseif (-not $pool.maxRunners) { '0..demand (uncapped)' } else { "0..$($pool.maxRunners)" }
     Write-Host ("  {0}: {1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $capacity, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
-    $imageSource = if ($pool.imageId) { 'pool imageId override' } else { 'shared RUNNER_IMAGE_ID' }
-    Write-Host ("  {0} labels: {1}; image: {2}" -f $pool.name, ($pool.labels -join ', '), $imageSource)
+    $imageSource = if ($pool.imageId) { 'pool imageId override' } elseif ($pool.osType -ceq 'Windows') { 'unqualified Windows image (disabled)' } else { 'shared RUNNER_IMAGE_ID' }
+    $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+    Write-Host ("  {0} labels: {1}; image: {2}; OS tag: {3}" -f $pool.name, ($pool.labels -join ', '), $imageSource, $osLabel)
 }
-Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
+Write-Host 'Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
+
+Write-Host 'Windows profiles:    explicit qualified imageId required; image build is separate'
 
 if ($Mode -ne 'Apply') {
     Write-Host 'Dry run only. No Azure resources were changed.'

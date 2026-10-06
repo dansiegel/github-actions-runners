@@ -6,8 +6,8 @@ Controller unit tests cover:
 
 - configuration rejects any nonzero minimum and invalid caps, while zero or omitted caps follow demand;
 - pool JSON preserves independent CPU/disk settings, optional image overrides, optional caps, and disabled profiles;
-- the eight profile labels map to the expected SKUs and tiers, with only small profiles disabled and `avp-linux-l` aliasing the existing `avp-linux` identity;
-- omitted or empty image overrides inherit the shared image; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
+- the eight Linux and six Windows profile labels map to the expected SKUs and tiers, with all Windows profiles and Linux small profiles disabled, Windows S/SP excluded and `avp-linux-l` aliasing the existing `avp-linux` identity;
+- omitted or empty Linux image overrides inherit the shared image; Windows never inherits it; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
 - demand above 20 is supported, and positive optional caps are respected;
 - a desired count of zero removes all known-idle VMs;
 - busy runners survive queue-driven scale-down and are removed after `JobCompleted`;
@@ -103,7 +103,7 @@ on: workflow_dispatch
 
 jobs:
   verify:
-    runs-on: avp-linux-m
+    runs-on: [Linux, avp-linux-m]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v5
@@ -155,3 +155,27 @@ The implementation is ready for repository migration only when:
 - the live Docker smoke test succeeds;
 - an idle observation proves zero runner VMs and zero tagged runner NICs/public IPs;
 - a controlled parallel test proves the required concurrency without quota failures.
+
+## Windows source and runtime tests
+
+The existing CI workflow also validates `image/windows-runner.pkr.hcl` without provisioning, parses every Windows image script, and runs `image/scripts/Test-WindowsRunner.ps1` on a GitHub-hosted Windows worker using Windows PowerShell 5.1. Fixtures cover raw/base64 custom data, strict schema, pinned version/checksum, payload deletion before the job, one-shot/reboot rejection, runner exit codes, and cleanup after failure. No fixture creates an Azure resource, enters a password, installs the image toolchain, or changes host remoting.
+
+Go tests additionally cover mixed-OS image/checksum isolation, disabled placeholders, rejection of password inputs, Windows computer-name uniqueness, Azure-generated secure defaults without password values/outputs, no repeat PUT after a lost response, deployment metadata removal, cancel-before-delete ordering, and no billable resources for an unqualified profile. Existing race tests for profile isolation, simultaneous claims, restart adoption, demand above 20, job completion, quota backoff, and cleanup remain applicable to both OS types.
+
+Source checks do not qualify a Windows image. Follow the bounded [Windows qualification procedure](operations.md#windows-profile-qualification) before enabling a profile. In addition to a real .NET/Node/Git job, require the finalizer's zero exit, `IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE`, and its account-cleanup manifest record. Inspect that no account named `packer`, private build credential, JIT registration, or one-shot marker remains. An ordinary build account must be absent; a built-in RID500 account must be named `Administrator` and disabled before capture, then reprovisioned by Azure with the runtime identity. Unit fixtures cover both SID branches, incomplete Sysprep, identity changes, name collisions, and cleanup commands whose readback shows no effect. No test creates or modifies real local users. Runtime WinRM/RDP must be disabled. Collect Windows diagnostics before deletion during failure qualification. Test controller restart/cancellation during template provisioning to prove no late VM appears after cleanup, and verify all tagged VMs, disks, NICs, public IPs, and deployment records are removed.
+
+OS-label regression checks cover automatic `Linux`/`Windows` scale-set labels, canonical deduplication of explicit matching OS labels, preservation of both legacy aliases, shared OS tags with unique profile labels, and rejection of mismatched or OS-only configurations. Before activation, compare Azure what-if results with Windows disabled and with only the bounded trial profile enabled: the existing lifecycle role must gain exactly six ARM deployment actions at the same resource-group scope. Re-disable and reprovision after the trial to remove them. Read back GitHub scale-set labels and execute combined-label smoke jobs before migrating existing custom-runner workflows.
+
+Certificate cleanup fixtures model provider, backing-file, and certificate-store state independently. They cover normal removal, already-absent keys, orphaned files, missing certificate metadata with a remaining key file, inaccessible storage, failed/no-op deletion, and malformed or foreign ownership metadata. They do not create real certificates or change host ACLs. Live qualification must additionally show the pre-Sysprep owned-key/file check and post-Sysprep provider/file/certificate absence, the `imageCertificateCleanup` manifest record, and the final command's successful exit. Any unknown key state or missing independent VM-agent completion rejects the image.
+
+Managed-finalization fixtures make no Azure calls. They cover VM ownership and existing permissions, one PUT with uncertain-response readback, already-existing command reconciliation, throttled reads, provisioning success while execution is still running, malformed/mismatched/truncated completion proof, timeout cancellation, and deletion readback. Guest fixtures use only a temporary directory to verify source hashing, atomic attempt acquisition, replay rejection, and non-overwriting completion publication. Live qualification must preserve the attempt ID, source SHA-256, terminal managed execution/exit code, cleanup proof, and command/resource-group absence. A green source fixture does not prove that the VM agent survives Server Sysprep; the bounded live trial must establish that channel.
+
+The administrator-task fixtures must also reject SYSTEM, a different SID, missing elevation, missing/denied batch-logon rights, altered task principal/action/limits, unchanged LastRunTime, nonzero task exit, missing completion, and failed task-removal readback. No test registers a real task or changes logon policy. Live qualification must confirm the S4U task actually starts as the existing administrator and that the separate VM-agent observer survives generalization.
+
+Batch-policy tests compile the native declarations on Windows PowerShell 5.1 but never open a real LSA policy handle. Mocked tests cover baseline reuse after registration retries, original direct grants, reordered sets, unrelated changes, changed denies, inaccessible state, one-SID removal, no-op removal, and ordinary-account deletion changing an original assignment. Source CI checks that the batch-assignment approval gate rejects its default and opts in only for no-resource validation.
+
+Task-definition checks also construct real ScheduledTasks CIM principal/action/settings objects in memory without registering a task. They normalize documented account-name/SID, enum, and ISO-duration representations while preserving the exact principal SID, action arguments, and 18-minute limit. Negative fixtures verify field-specific diagnostics and reject altered identities, actions, logon modes, limits, retry settings, triggers, and non-Boolean termination values without logging arbitrary task content. Live failures must retain the mismatch field/type evidence; a combined assertion alone cannot identify which property differed.
+
+Finalization cleanup-order fixtures require listener/firewall/token-policy removal and readback before Sysprep, then owned-key cleanup and account retirement. Every failed remoting step stops that sequence. Runtime task checks resolve SYSTEM aliases to SID `S-1-5-18`. Failure fixtures verify atomic first-failure preservation, bounded exception-type/HRESULT chains, exact source line and operation, attempt/source matching, and independent guest/host field projection; raw messages, commands, paths and arbitrary extra fields are never emitted. Missing or malformed diagnostics cannot authorize capture. The operator prints validated failure metadata before deleting its managed command so automatic VM cleanup does not erase the only actionable evidence.
+
+The worker validates the SYSTEM startup task before generalization and account retirement. Cleanup-order fixtures reject a worker task read after either operation; observer fixtures independently reject a startup task that disappears or changes identity afterward. The image remains ineligible for capture until that post-cleanup SYSTEM readback succeeds.

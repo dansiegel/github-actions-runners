@@ -17,6 +17,7 @@ import (
 const (
 	defaultARMEndpoint = "https://management.azure.com"
 	defaultRunnerUser  = "actions-runner"
+	defaultWindowsRunnerSHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 )
 
 type Config struct {
@@ -35,6 +36,7 @@ type Config struct {
 	SubnetID       string
 	VMSize         string
 	ImageID        string
+	OSType         string
 	VMAdminUser    string
 	VMSSHPublicKey string
 	VMPriority     string
@@ -42,6 +44,7 @@ type Config struct {
 
 	RunnerVersion string
 	RunnerSHA256  string
+	WindowsRunnerSHA256 string
 	RunnerUser    string
 	OSDiskSizeGB  int
 	OSDiskTier    string
@@ -65,6 +68,7 @@ type RunnerPool struct {
 	OSDiskTier string   `json:"osDiskTier"`
 	Enabled    *bool    `json:"enabled,omitempty"`
 	ImageID    string   `json:"imageId,omitempty"`
+	OSType     string   `json:"osType,omitempty"`
 }
 
 func (p *RunnerPool) UnmarshalJSON(data []byte) error {
@@ -79,15 +83,16 @@ func (p *RunnerPool) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true}
+	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true, "osType":true}
 	for key := range fields {
 		if !allowed[key] { return fmt.Errorf("unknown runner pool field %q", key) }
 	}
-	for _, key := range []string{"maxRunners", "enabled", "imageId"} {
+	for _, key := range []string{"maxRunners", "enabled", "imageId", "osType"} {
 		if value, present := fields[key]; present && strings.TrimSpace(string(value)) == "null" {
 			return fmt.Errorf("%s cannot be null", key)
 		}
 	}
+	if _, present := fields["osType"]; present && decoded.OSType != "Linux" && decoded.OSType != "Windows" { return fmt.Errorf("osType must be Linux or Windows") }
 	*p = RunnerPool(decoded)
 	return nil
 }
@@ -109,6 +114,7 @@ func LoadConfig() (Config, error) {
 		VMPriority:      env("RUNNER_VM_PRIORITY", "Regular"),
 		RunnerVersion:   env("RUNNER_VERSION", "2.337.0"),
 		RunnerSHA256:    env("RUNNER_SHA256", "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"),
+		WindowsRunnerSHA256: env("WINDOWS_RUNNER_SHA256", defaultWindowsRunnerSHA256),
 		RunnerUser:      env("RUNNER_USER", defaultRunnerUser),
 		OSDiskTier:      env("RUNNER_OS_DISK_TIER", ""),
 		ARMEndpoint:     strings.TrimRight(env("AZURE_ARM_ENDPOINT", defaultARMEndpoint), "/"),
@@ -160,9 +166,23 @@ func LoadConfig() (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	return c.validate(true)
+}
+
+func (c *Config) validate(requireImage bool) error {
 	if len(c.Pools) > 0 {
 		_, err := c.PoolConfigs()
 		return err
+	}
+	if c.OSType == "" { c.OSType = "Linux" }
+	if c.OSType != "Linux" && c.OSType != "Windows" {
+		return fmt.Errorf("osType must be Linux or Windows")
+	}
+	if c.OSType == "Windows" && requireImage && strings.TrimSpace(c.ImageID) == "" {
+		return fmt.Errorf("Windows profiles require an explicit qualified imageId")
+	}
+	if c.OSType == "Linux" && strings.TrimSpace(c.VMSSHPublicKey) == "" {
+		return fmt.Errorf("RUNNER_ADMIN_SSH_PUBLIC_KEY is required for Linux")
 	}
 	parsed, err := url.ParseRequestURI(c.RegistrationURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
@@ -177,11 +197,15 @@ func (c *Config) Validate() error {
 	if len(c.Labels) == 0 {
 		c.Labels = []string{c.ScaleSetName}
 	}
+	profileLabels := 0
 	for _, label := range c.Labels {
-		if strings.TrimSpace(label) == "" {
-			return fmt.Errorf("RUNNER_LABELS cannot contain an empty label")
-		}
+		label = strings.TrimSpace(label)
+		if label == "" { return fmt.Errorf("RUNNER_LABELS cannot contain an empty label") }
+		if isOperatingSystemLabel(label) {
+			if !strings.EqualFold(label, c.OperatingSystemLabel()) { return fmt.Errorf("runner OS label %q conflicts with osType %s", label, c.OperatingSystemLabel()) }
+		} else { profileLabels++ }
 	}
+	if profileLabels == 0 { return fmt.Errorf("RUNNER_LABELS requires a profile label in addition to the operating system") }
 	if err := c.GitHubApp.Validate(); err != nil {
 		return fmt.Errorf("GitHub App configuration is invalid: %w", err)
 	}
@@ -198,7 +222,6 @@ func (c *Config) Validate() error {
 		"RUNNER_SUBNET_ID":            c.SubnetID,
 		"RUNNER_VM_SIZE":              c.VMSize,
 		"RUNNER_ADMIN_USERNAME":       c.VMAdminUser,
-		"RUNNER_ADMIN_SSH_PUBLIC_KEY": c.VMSSHPublicKey,
 		"RUNNER_VERSION":              c.RunnerVersion,
 		"RUNNER_SHA256":               c.RunnerSHA256,
 	} {
@@ -258,6 +281,13 @@ func (c Config) PoolConfigs() ([]Config, error) {
 			p.VMPriority = "Regular"
 		}
 		p.OSDiskTier = strings.TrimSpace(pool.OSDiskTier)
+		p.OSType = pool.OSType
+		if p.OSType == "Windows" {
+			// Never inherit the shared Linux image or Linux runner archive checksum.
+			p.ImageID = ""
+			p.RunnerSHA256 = c.WindowsRunnerSHA256
+			if p.RunnerSHA256 == "" { p.RunnerSHA256 = defaultWindowsRunnerSHA256 }
+		}
 		if imageID := strings.TrimSpace(pool.ImageID); imageID != "" {
 			p.ImageID = imageID
 		}
@@ -265,11 +295,12 @@ func (c Config) PoolConfigs() ([]Config, error) {
 		if len(p.Labels) == 0 {
 			p.Labels = []string{name}
 		}
-		if err := p.Validate(); err != nil {
+		if err := p.validate(pool.Enabled == nil || *pool.Enabled); err != nil {
 			return nil, fmt.Errorf("runner pool %q: %w", name, err)
 		}
 		for _, label := range p.Labels {
 			key := strings.ToLower(strings.TrimSpace(label))
+			if isOperatingSystemLabel(key) { continue }
 			if owner, ok := labels[key]; ok {
 				return nil, fmt.Errorf("runner label %q is repeated in pools %q and %q", label, owner, name)
 			}
@@ -294,12 +325,24 @@ func (c Config) ListenerMaxRunners() int {
 	return c.MaxRunners
 }
 
+func (c Config) OperatingSystemLabel() string {
+	if c.OSType == "Windows" { return "Windows" }
+	return "Linux"
+}
+
+func isOperatingSystemLabel(label string) bool {
+	return strings.EqualFold(label, "Linux") || strings.EqualFold(label, "Windows") || strings.EqualFold(label, "macOS")
+}
+
 func (c Config) ScaleSetLabels() []scaleset.Label {
-	labels := make([]scaleset.Label, 0, len(c.Labels))
+	labels := make([]scaleset.Label, 0, len(c.Labels)+1)
 	for _, label := range c.Labels {
-		labels = append(labels, scaleset.Label{Name: strings.TrimSpace(label)})
+		label = strings.TrimSpace(label)
+		if !isOperatingSystemLabel(label) { labels = append(labels, scaleset.Label{Name: label}) }
 	}
-	return labels
+	// Advertise OS at the scale-set level so queued jobs can match while the
+	// pool has zero VMs. Runtime runner default labels arrive too late for that.
+	return append(labels, scaleset.Label{Name: c.OperatingSystemLabel()})
 }
 
 func env(name, fallback string) string {

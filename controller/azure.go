@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,7 +68,17 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 	if err != nil {
 		return RunnerVM{}, err
 	}
+	// Validate and render before creating any billable network resources.
+	osProfile, err := renderOSProfile(m.config, runnerName, encodedJITConfig)
+	if err != nil { return RunnerVM{}, err }
 	vmName := azureResourceName(runnerName)
+	if m.config.OSType == "Windows" {
+		// Fail a missing deployment-read grant before allocating a NIC/IP that
+		// this controller could not safely clean up through the Windows path.
+		if _, err := m.get(ctx, m.deploymentID(vmName), deploymentAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
+			return RunnerVM{}, fmt.Errorf("checking Windows deployment access: %w", err)
+		}
+	}
 	createdAt := time.Now().UTC()
 	tags := map[string]string{
 		"managed-by":         "gha-runner-scale-controller",
@@ -141,22 +150,7 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		"hardwareProfile": map[string]any{
 			"vmSize": m.config.VMSize,
 		},
-		"osProfile": map[string]any{
-			"computerName":  takeString(vmName, 63),
-			"adminUsername": m.config.VMAdminUser,
-			"customData":    base64.StdEncoding.EncodeToString([]byte(renderCloudInit(m.config, encodedJITConfig))),
-			"linuxConfiguration": map[string]any{
-				"disablePasswordAuthentication": true,
-				"ssh": map[string]any{
-					"publicKeys": []any{
-						map[string]any{
-							"path":    fmt.Sprintf("/home/%s/.ssh/authorized_keys", m.config.VMAdminUser),
-							"keyData": m.config.VMSSHPublicKey,
-						},
-					},
-				},
-			},
-		},
+		"osProfile": osProfile,
 		"storageProfile": map[string]any{
 			"imageReference": imageReference,
 			"osDisk": map[string]any{
@@ -190,11 +184,8 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		vmProperties["billingProfile"] = map[string]any{"maxPrice": -1}
 	}
 
-	if err := m.put(ctx, m.vmID(vmName), computeAPIVersion, map[string]any{
-		"location":   m.config.Location,
-		"tags":       tags,
-		"properties": vmProperties,
-	}); err != nil {
+	vmBody := map[string]any{"location": m.config.Location, "tags": tags, "properties": vmProperties}
+	if err := m.createRunnerVM(ctx, vmName, vmBody); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cleanupCancel()
 		if isOperationPreempted(err) && m.vmExists(cleanupCtx, vmName) {
@@ -213,6 +204,10 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 func (m *AzureVMManager) Delete(ctx context.Context, vmName string) error {
 	vmName = azureResourceName(vmName)
 	var result error
+	if m.config.OSType == "Windows" {
+		// Cancel any in-flight template before deleting its VM or NIC.
+		if err := m.finishWindowsDeployment(ctx, vmName, true); err != nil { return err }
+	}
 	if err := m.delete(ctx, m.vmID(vmName), computeAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
 		return fmt.Errorf("deleting VM %s: %w", vmName, err)
 	}
@@ -367,7 +362,13 @@ func (m *AzureVMManager) resourceURL(resourceID, apiVersion string) string {
 }
 
 func (m *AzureVMManager) request(ctx context.Context, method, requestURL string, body []byte, accepted ...int) ([]byte, error) {
-	for attempt := 0; attempt < 5; attempt++ {
+    return m.requestWithRetry(ctx, method, requestURL, body, true, accepted...)
+}
+
+func (m *AzureVMManager) requestWithRetry(ctx context.Context, method, requestURL string, body []byte, retry bool, accepted ...int) ([]byte, error) {
+	maxAttempts := 5
+	if !retry { maxAttempts = 1 }
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		accessToken, err := m.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}})
 		if err != nil {
 			return nil, fmt.Errorf("getting Azure access token: %w", err)
@@ -388,7 +389,7 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 
 		resp, err := m.httpClient.Do(req)
 		if err != nil {
-			if attempt == 4 {
+			if attempt == maxAttempts-1 {
 				return nil, err
 			}
 			if err := sleepContext(ctx, time.Duration(attempt+1)*time.Second); err != nil {
@@ -417,7 +418,7 @@ func (m *AzureVMManager) request(ctx context.Context, method, requestURL string,
 			}
 			return responseBody, nil
 		}
-		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 4 {
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < maxAttempts-1 {
 			delay := retryDelay(resp.Header, attempt)
 			if err := sleepContext(ctx, delay); err != nil {
 				return nil, err
