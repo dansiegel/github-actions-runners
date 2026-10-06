@@ -383,6 +383,7 @@ function Test-WindowsAdministratorFinalization {
     function Test-WindowsBuildCngKey { param($Identity) return $fixture.scenario -eq 'key-remains' }
     function Get-WindowsBuildKeyFile { param($Identity) if ($fixture.scenario -eq 'key-file-remains') { return 'file' } }
     function Get-ChildItem { [CmdletBinding()] param($Path, $LiteralPath, [switch] $Force) if ($LiteralPath -and $fixture.scenario -eq 'source-remains') { [pscustomobject]@{ Name = 'Complete-WindowsRunnerImage.ps1' } }; if ($fixture.scenario -eq 'certificate-remains' -and $Path -like 'Cert:*') { [pscustomobject]@{ Thumbprint = ('B' * 40); FriendlyName = 'GitHubRunnerPackerWinRM' } } }
+    function Get-Service { [CmdletBinding()] param($Name) return [pscustomobject]@{ Status = 'Running' } }
     function Get-NetFirewallRule { [CmdletBinding()] param() if ($fixture.scenario -eq 'firewall-remains') { [pscustomobject]@{ Name = 'WINRM-Packer-Build' } } }
     function Get-ItemProperty { [CmdletBinding()] param($Path) return [pscustomobject]@{ ImageState = $(if ($fixture.scenario -eq 'incomplete-sysprep') { 'IMAGE_STATE_COMPLETE' } else { 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' }); LocalAccountTokenFilterPolicy = $(if ($fixture.scenario -eq 'token-policy-remains') { 1 } else { 0 }) } }
     function Remove-Item { [CmdletBinding()] param($LiteralPath, [switch] $Force) if ($LiteralPath -cne $source) { throw 'Observer deleted an unrelated file' } }
@@ -426,6 +427,115 @@ function Test-WindowsAdministratorFinalization {
     Write-Output 'Administrator S4U staging, identity/elevation/policy gates, independent completion/readbacks, and task cleanup tests passed.'
 }
 Test-WindowsAdministratorFinalization
+
+
+function Test-WindowsFinalizationFailureEvidence {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    . (Join-Path $PSScriptRoot 'Invoke-WindowsImageFinalization.ps1')
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('runner-failure-test-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root | Out-Null
+    $context = @{ root = $root; attempt = '11111111-1111-1111-1111-111111111111'; sha = ('a' * 64) }
+    try {
+        $failed = $false
+        try { Invoke-WindowsFinalizationOperation $context 'listeners-remove' { throw [InvalidOperationException]::new('DIAGNOSTIC_SECRET_CANARY', [Runtime.InteropServices.COMException]::new('PRIVATE_INNER_MESSAGE', -2147024891)) } } catch { $failed = $true }
+        if (-not $failed) { throw 'Operation wrapper suppressed the original error' }
+        $first = Read-WindowsFinalizationFailure -Context $context
+        if ($first.operation -cne 'listeners-remove' -or @($first.errors).Count -lt 2) { throw 'Original operation/native error chain was not captured' }
+        # A subsequent cleanup error must not overwrite the first failure.
+        try { Invoke-WindowsFinalizationOperation $context 'observer-cleanup' { throw 'SECONDARY_SECRET_CANARY' } } catch { }
+        $record = Read-WindowsFinalizationFailure -Context $context
+        if ($record.operation -cne 'listeners-remove') { throw 'Cleanup replaced the original failure' }
+        $serialized = $record | ConvertTo-Json -Depth 5 -Compress
+        if ($serialized.Length -gt 1500 -or $serialized -match 'SECRET_CANARY|PRIVATE_INNER_MESSAGE') { throw 'Failure telemetry leaked arbitrary content or exceeded its bound' }
+        $record | Add-Member -NotePropertyName rawMessage -NotePropertyValue 'DIAGNOSTIC_SECRET_CANARY'
+        $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'image-finalization.failure.json')
+        $guestSafe = Read-WindowsFinalizationFailure -Context $context | ConvertTo-Json -Depth 5 -Compress
+        if ($guestSafe -match 'rawMessage|SECRET_CANARY') { throw 'Guest emitted an unapproved telemetry field' }
+        $line = 'GHA_IMAGE_FINALIZATION_FAILURE ' + ($record | ConvertTo-Json -Depth 5 -Compress)
+        $hostSafe = Read-WindowsFinalizationFailureOutput -Output $line -ExpectedAttempt $context.attempt -ExpectedSHA256 $context.sha
+        if ($hostSafe.operation -cne 'listeners-remove' -or ($hostSafe | ConvertTo-Json -Depth 5) -match 'rawMessage|SECRET_CANARY') { throw 'Host did not independently sanitize failure evidence' }
+        if ($null -ne (Read-WindowsFinalizationFailureOutput -Output 'no failure record' -ExpectedAttempt $context.attempt -ExpectedSHA256 $context.sha)) { throw 'Missing diagnostics became evidence' }
+        foreach ($scenario in @('attempt', 'source', 'operation', 'line', 'category', 'exception', 'hresult', 'too-long')) {
+            $bad = $first | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+            switch ($scenario) {
+                'attempt' { $bad.attemptId = 'other' }
+                'source' { $bad.scriptSHA256 = 'b' * 64 }
+                'operation' { $bad.operation = 'unknown-operation' }
+                'line' { $bad.sourceLine = '1' }
+                'category' { $bad.category = 100 }
+                'exception' { $bad.errors[0].type = 'DIAGNOSTIC_SECRET_CANARY' }
+                'hresult' { $bad.errors[0].hresult = '0' }
+            }
+            $badText = $bad | ConvertTo-Json -Depth 5 -Compress
+            if ($scenario -eq 'too-long') { $badText = 'x' * 2049 }
+            $badText | Set-Content -LiteralPath (Join-Path $root 'image-finalization.failure.json')
+            foreach ($reader in @('guest', 'host')) {
+                $rejected = $false
+                try {
+                    if ($reader -eq 'guest') { Read-WindowsFinalizationFailure -Context $context | Out-Null }
+                    else { Read-WindowsFinalizationFailureOutput -Output ('GHA_IMAGE_FINALIZATION_FAILURE ' + $badText) -ExpectedAttempt $context.attempt -ExpectedSHA256 $context.sha | Out-Null }
+                } catch { $rejected = $true }
+                if (-not $rejected) { throw "Invalid diagnostics accepted: $reader/$scenario" }
+            }
+        }
+        foreach ($user in @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'S-1-5-18')) {
+            Assert-WindowsRuntimeTask -Task ([pscustomobject]@{ Principal = [pscustomobject]@{ UserId = $user }; State = 'Ready' })
+        }
+        foreach ($user in @('', 'S-1-5-21-1-2-3-1001')) {
+            $rejected = $false
+            try { Assert-WindowsRuntimeTask -Task ([pscustomobject]@{ Principal = [pscustomobject]@{ UserId = $user }; State = 'Ready' }) } catch { $rejected = $true }
+            if (-not $rejected) { throw 'Runtime task accepted an unresolved or non-SYSTEM identity' }
+        }
+    } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+    Write-Output 'First-failure preservation, bounded native-code telemetry, guest/host sanitization, and exact runtime SYSTEM identity tests passed.'
+}
+Test-WindowsFinalizationFailureEvidence
+
+function Test-WindowsFinalizationCleanupOrder {
+    . (Join-Path $PSScriptRoot 'Complete-WindowsRunnerImage.ps1')
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('runner-order-test-' + [Guid]::NewGuid().ToString('N'))
+    $context = @{ root = $root; attempt = '11111111-1111-1111-1111-111111111111'; sha = ('a' * 64) }
+    $order = [Collections.Generic.List[string]]::new()
+    $orderState = @{ fail = ''; listeners = $true; firewall = $true; token = 1; retired = $false; generalized = $false }
+    function Write-WindowsImageFinalizationPhase {
+        param($Root, $Phase)
+        $order.Add($Phase)
+        if ($orderState.fail -ceq $Phase) { throw 'SIMULATED_PRIVATE_FAILURE' }
+    }
+    function Get-WindowsImageBuildAccount { return [pscustomobject]@{ mode = 'BuiltinAdministrator'; sid = 'S-1-5-21-1-2-3-500' } }
+    function Get-WindowsImageBuildCertificate { return [pscustomobject]@{ thumbprint = ('A' * 40); provider = 'Microsoft Software Key Storage Provider'; machineKey = $true; keyName = 'owned'; uniqueName = 'owned-file' } }
+    function Get-Service { [CmdletBinding()] param($Name) return [pscustomobject]@{ Status = 'Running' } }
+    function Get-ChildItem { [CmdletBinding()] param($Path) if ($orderState.retired -or $orderState.generalized) { throw 'Worker used WSMan after credentials were retired' }; if ($orderState.listeners) { return 'owned-listener' } }
+    function Remove-Item { [CmdletBinding()] param([Parameter(ValueFromPipeline)] $InputObject, [switch] $Recurse, [switch] $Force) process { $orderState.listeners = $false } }
+    function Get-NetFirewallRule { [CmdletBinding()] param() if ($orderState.firewall) { return [pscustomobject]@{ Name = 'WINRM-Packer-Build' } } }
+    function Remove-NetFirewallRule { [CmdletBinding()] param([Parameter(ValueFromPipeline)] $InputObject) process { $orderState.firewall = $false } }
+    function New-ItemProperty { [CmdletBinding()] param($Path, $Name, $PropertyType, $Value, [switch] $Force) $orderState.token = $Value }
+    function Get-ItemProperty { [CmdletBinding()] param($Path) return [pscustomobject]@{ LocalAccountTokenFilterPolicy = $orderState.token; ImageState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } }
+    function Invoke-WindowsImageSysprep {
+        if ($orderState.listeners -or $orderState.firewall -or $orderState.token -ne 0 -or $orderState.retired) { throw 'Sysprep preceded completed remoting cleanup' }
+        $orderState.generalized = $true
+    }
+    function Remove-WindowsImageBuildCertificate { param($Identity) if (-not $orderState.generalized) { throw 'Certificate cleanup preceded Sysprep' }; return @{ privateKeyAbsent = $true; certificateAbsent = $true } }
+    function Remove-WindowsImageBuildAccount { param($Expected) if (-not $orderState.generalized) { throw 'Account retirement preceded Sysprep' }; $orderState.retired = $true; return $Expected }
+    function Assert-WindowsImageAccountCleanup { param($Cleanup, $GeneralizationState) if (-not $orderState.retired) { throw 'Account cleanup missing' } }
+    try {
+        foreach ($fail in @('', 'winrm-service-check', 'listeners-read', 'listeners-remove', 'firewall-read', 'firewall-remove', 'token-policy-restore', 'listeners-verify', 'firewall-verify', 'token-policy-verify')) {
+            if (Test-Path $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force }
+            New-Item -ItemType Directory -Path $root | Out-Null
+            $order.Clear(); $orderState.fail = $fail; $orderState.listeners = $true; $orderState.firewall = $true; $orderState.token = 1; $orderState.retired = $false; $orderState.generalized = $false
+            $rejected = $false
+            try { $result = Complete-WindowsImageBuildIdentity -Context $context } catch { $rejected = $true }
+            if (-not $fail) {
+                if ($rejected -or -not $orderState.retired -or -not $result.certificate.privateKeyAbsent -or $order.IndexOf('token-policy-verify') -gt $order.IndexOf('sysprep')) { throw 'Successful cleanup order changed' }
+            } else {
+                if (-not $rejected -or $orderState.generalized -or $orderState.retired) { throw "Failed remoting step continued to Sysprep: $fail" }
+                if ((Read-WindowsFinalizationFailure -Context $context).operation -cne $fail) { throw "Failure lost its exact operation: $fail" }
+            }
+        }
+    } finally { if (Test-Path $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force } }
+    Write-Output 'Remoting cleanup/readbacks precede Sysprep, key cleanup, and account retirement; failed steps cannot continue.'
+}
+Test-WindowsFinalizationCleanupOrder
 
 function Test-WindowsManagedFinalization {
     . (Join-Path $PSScriptRoot 'Invoke-WindowsImageFinalization.ps1')
@@ -491,13 +601,18 @@ function Test-WindowsManagedFinalization {
                     if ($testState.scenario -in @('timeout', 'running-then-success') -and ($testState.scenario -eq 'timeout' -or $testState.polls -lt 3)) { $command.properties.instanceView.executionState = 'Running' }
                     if ($testState.scenario -eq 'failed-command') { $command.properties.instanceView.executionState = 'Failed'; $command.properties.instanceView.exitCode = 1 }
                     if ($testState.scenario -eq 'bad-proof') { $command.properties.instanceView.output = '' }
+                    if ($testState.scenario -eq 'conflicting-failure') {
+                        $failed = @{ schemaVersion = 1; status = 'Failed'; attemptId = $attempt; scriptSHA256 = $sha; operation = 'listeners-read'; sourceLine = 1; category = 0; errors = @(@{ type = 'System.Exception'; hresult = 0 }) }
+                        $command.properties.instanceView.output += "`nGHA_IMAGE_FINALIZATION_FAILURE " + ($failed | ConvertTo-Json -Depth 5 -Compress)
+                    }
+                    if ($testState.scenario -eq 'malformed-failure') { $command.properties.instanceView.output += "`nGHA_IMAGE_FINALIZATION_FAILURE {}" }
                 }
                 return $command
             }
             default { throw 'Unexpected finalizer method' }
         }
     }
-    foreach ($scenario in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command', 'put-denied', 'put-missing', 'timeout', 'failed-command', 'bad-proof', 'delete-no-op')) {
+    foreach ($scenario in @('normal', 'put-uncertain', 'existing', 'running-then-success', 'throttled-read', 'delete-uncertain', 'missing-permission', 'denied-permission-read', 'foreign-vm', 'foreign-command', 'put-denied', 'put-missing', 'timeout', 'failed-command', 'bad-proof', 'conflicting-failure', 'malformed-failure', 'delete-no-op')) {
         $testState.Clear()
         $testState.scenario = $scenario; $testState.now = [DateTime]::UtcNow; $testState.puts = 0; $testState.deletes = 0; $testState.polls = 0; $testState.exists = $scenario -in @('existing', 'foreign-command')
         $rejected = $false

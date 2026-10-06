@@ -410,6 +410,8 @@ function Wait-WindowsImageFinalizationTask {
     $completedPath = Join-Path $Root 'image-finalization.complete.json'
     $observedPath = Join-Path $Root 'image-finalization.observed.json'
     $ownsTask = $true
+    $diagnosticContext = @{ root = $Root; attempt = $Attempt; sha = $SourceSHA256 }
+    $observerOperation = 'observer-task'
     try {
         if (-not (Test-Path -LiteralPath $dispatchPath)) {
             $account = Get-WindowsImageBuildAccount
@@ -446,6 +448,7 @@ function Wait-WindowsImageFinalizationTask {
             Wait-WindowsImageTaskPoll
         }
         if (-not $newRun -or $task.State -in @('Running', 'Queued')) { throw 'Administrator finalization task did not finish before its deadline' }
+        $observerOperation = 'observer-state'
         $proof = Get-Content -LiteralPath $completedPath -Raw | ConvertFrom-Json
         if ($proof.attemptId -cne $Attempt -or $proof.scriptSHA256 -cne $SourceSHA256 -or $proof.status -cne 'Succeeded' -or $proof.accountCleanup.sid -cne $principalSID) { throw 'Task completion does not match the current administrator attempt' }
         $started = Get-Content -LiteralPath (Join-Path $Root 'image-finalization.started.json') -Raw | ConvertFrom-Json
@@ -456,11 +459,13 @@ function Wait-WindowsImageFinalizationTask {
         Assert-WindowsImageAccountCleanup -Cleanup $proof.accountCleanup -GeneralizationState $imageState
         if ((Test-WindowsBuildCngKey -Identity $proof.keyIdentity) -or (Get-WindowsBuildKeyFile -Identity $proof.keyIdentity)) { throw 'Observer cannot verify build private-key absence' }
         if (@(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop | Where-Object { $_.Thumbprint -ieq $proof.keyIdentity.thumbprint -or $_.FriendlyName -eq 'GitHubRunnerPackerWinRM' }).Count) { throw 'Observer found the build certificate' }
+        Assert-WindowsFinalizationWinRMService
         if (@(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop).Count) { throw 'Observer found a WinRM listener' }
         if (@(Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build').Count) { throw 'Observer found the build firewall rule' }
         if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).LocalAccountTokenFilterPolicy -ne 0) { throw 'Observer found the build token policy' }
         $runtime = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop
-        if ($runtime.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $runtime.State -eq 'Disabled') { throw 'Observer could not verify the runtime SYSTEM task' }
+        Assert-WindowsRuntimeTask -Task $runtime
+        $observerOperation = 'observer-cleanup'
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
         if (@(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count) { throw 'Finalization task remains after removal' }
         $ownsTask = $false
@@ -475,6 +480,9 @@ function Wait-WindowsImageFinalizationTask {
         [IO.File]::WriteAllText($pending, ($proof | ConvertTo-Json -Depth 5 -Compress), [Text.UTF8Encoding]::new($false))
         [IO.File]::Move($pending, $observedPath)
         return $proof
+    } catch {
+        Write-WindowsFinalizationFailureEvidence -Context $diagnosticContext -Operation $observerOperation -Failure $_
+        throw
     } finally {
         if ($ownsTask) {
             # Agent cancellation may interrupt this block. The task's own 18m
@@ -497,17 +505,159 @@ function Write-WindowsImageFinalizationPhase {
     Write-Output $line
 }
 
+
+function Get-WindowsFinalizationFailureOperations {
+    return @('administrator-check', 'attempt-create', 'image-preflight', 'runtime-task-create', 'maintenance-policy', 'identity-cleanup', 'account-preflight', 'certificate-preflight', 'guest-agent-check', 'winrm-service-check', 'listeners-read', 'listeners-remove', 'firewall-read', 'firewall-remove', 'token-policy-restore', 'listeners-verify', 'firewall-verify', 'token-policy-verify', 'sysprep', 'certificate-cleanup', 'account-cleanup', 'account-verify', 'manifest-publish', 'runtime-task-read', 'runtime-task-verify', 'generalization-read', 'completion-publish', 'observer-task', 'observer-state', 'observer-cleanup')
+}
+
+function New-WindowsFinalizationFailure {
+    param($Context, [string] $Operation, $Failure)
+    if ($Operation -cnotin (Get-WindowsFinalizationFailureOperations)) { throw 'Unknown finalization operation' }
+    $errors = @()
+    $exception = $Failure.Exception
+    while ($null -ne $exception -and $errors.Count -lt 3) {
+        $type = $exception.GetType().FullName
+        if ($type -cnotin @('System.Exception', 'System.InvalidOperationException', 'System.UnauthorizedAccessException', 'System.ComponentModel.Win32Exception', 'System.Runtime.InteropServices.COMException', 'System.Security.Cryptography.CryptographicException', 'System.Management.Automation.RuntimeException', 'System.Management.Automation.CmdletInvocationException', 'System.Management.Automation.MethodInvocationException', 'System.Management.Automation.ItemNotFoundException', 'Microsoft.Management.Infrastructure.CimException')) { $type = 'Other' }
+        $errors += @{ type = $type; hresult = [int]$exception.HResult }
+        $exception = $exception.InnerException
+    }
+    return [pscustomobject]@{
+        schemaVersion = 1; status = 'Failed'; attemptId = $Context.attempt; scriptSHA256 = $Context.sha
+        operation = $Operation; sourceLine = [int]$Failure.InvocationInfo.ScriptLineNumber
+        category = [int]$Failure.CategoryInfo.Category; errors = $errors
+    }
+}
+
+function Save-WindowsFinalizationFailure {
+    param($Context, [string] $Operation, $Failure)
+    $path = Join-Path $Context.root 'image-finalization.failure.json'
+    if (Test-Path -LiteralPath $path) { return }
+    $record = New-WindowsFinalizationFailure -Context $Context -Operation $Operation -Failure $Failure
+    $pending = $path + '.pending'
+    $stream = [IO.File]::Open($pending, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Depth 5 -Compress))
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+    [IO.File]::Move($pending, $path)
+}
+
+function Read-WindowsFinalizationFailure {
+    param($Context)
+    $path = Join-Path $Context.root 'image-finalization.failure.json'
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    $text = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    if ($text.Length -gt 2048) { throw 'Oversized finalization failure record' }
+    $record = $text | ConvertFrom-Json
+    if ($record.schemaVersion -ne 1 -or $record.status -cne 'Failed' -or $record.attemptId -cne $Context.attempt -or $record.scriptSHA256 -cne $Context.sha -or $record.operation -cnotin (Get-WindowsFinalizationFailureOperations) -or ($record.sourceLine -isnot [int] -and $record.sourceLine -isnot [long]) -or $record.sourceLine -lt 0 -or $record.sourceLine -gt 100000 -or ($record.category -isnot [int] -and $record.category -isnot [long]) -or $record.category -lt 0 -or $record.category -gt 31 -or @($record.errors).Count -notin @(1, 2, 3)) { throw 'Mismatched finalization failure record' }
+    $errors = @()
+    foreach ($entry in $record.errors) {
+        if (($entry.hresult -isnot [int] -and $entry.hresult -isnot [long]) -or $entry.hresult -lt [int]::MinValue -or $entry.hresult -gt [int]::MaxValue) { throw 'Invalid failure HRESULT' }
+        $type = [string]$entry.type
+        if ($type -cnotin @('System.Exception', 'System.InvalidOperationException', 'System.UnauthorizedAccessException', 'System.ComponentModel.Win32Exception', 'System.Runtime.InteropServices.COMException', 'System.Security.Cryptography.CryptographicException', 'System.Management.Automation.RuntimeException', 'System.Management.Automation.CmdletInvocationException', 'System.Management.Automation.MethodInvocationException', 'System.Management.Automation.ItemNotFoundException', 'Microsoft.Management.Infrastructure.CimException', 'Other')) { throw 'Unknown failure exception type' }
+        $errors += @{ type = $type; hresult = $entry.hresult }
+    }
+    # Project only approved metadata, never any extra fields found in the file.
+    return [pscustomobject]@{ schemaVersion = 1; status = 'Failed'; attemptId = $record.attemptId; scriptSHA256 = $record.scriptSHA256; operation = $record.operation; sourceLine = $record.sourceLine; category = $record.category; errors = $errors }
+}
+
+
+function Write-WindowsFinalizationFailureEvidence {
+    param($Context, [string] $Operation, $Failure)
+    $record = $null
+    try { $record = Read-WindowsFinalizationFailure -Context $Context }
+    catch { Write-Warning 'Worker failure metadata is unavailable or invalid.' }
+    try {
+        if ($null -eq $record) { $record = New-WindowsFinalizationFailure -Context $Context -Operation $Operation -Failure $Failure }
+        Write-Host ('GHA_IMAGE_FINALIZATION_FAILURE ' + ($record | ConvertTo-Json -Depth 5 -Compress))
+    } catch { Write-Warning 'Finalization failure evidence could not be emitted.' }
+}
+
+function Invoke-WindowsFinalizationOperation {
+    param($Context, [string] $Operation, [scriptblock] $Action)
+    try {
+        Write-WindowsImageFinalizationPhase -Root $Context.root -Phase $Operation | Out-Null
+        & $Action
+    } catch {
+        # Diagnostics must never replace the original terminating failure.
+        try { Save-WindowsFinalizationFailure -Context $Context -Operation $Operation -Failure $_ }
+        catch { Write-Warning 'Finalization failure metadata could not be saved.' }
+        throw
+    }
+}
+
+function Assert-WindowsRuntimeTask {
+    param($Task)
+    $principal = Get-WindowsFinalizationTaskProperty $Task 'Principal'
+    try { $sid = Resolve-WindowsFinalizationTaskSID -UserId (Get-WindowsFinalizationTaskProperty $principal 'UserId') }
+    catch { throw 'Runtime task principal cannot be resolved to a SID' }
+    $state = [string](Get-WindowsFinalizationTaskProperty $Task 'State')
+    if ($sid -cne 'S-1-5-18' -or $state -notin @('Ready', 'Running', 'Queued', '3', '4', '2')) { throw 'Runtime task must use SYSTEM and be enabled' }
+}
+
+function Assert-WindowsFinalizationWinRMService {
+    if ((Get-Service -Name WinRM -ErrorAction Stop).Status -ne 'Running') { throw 'WinRM service stopped before its explicit configuration readback' }
+}
+
+function Remove-WindowsImageBuildRemoting {
+    param($Context)
+    Invoke-WindowsFinalizationOperation $Context 'winrm-service-check' { Assert-WindowsFinalizationWinRMService }
+    $listeners = @(Invoke-WindowsFinalizationOperation $Context 'listeners-read' { Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop })
+    Invoke-WindowsFinalizationOperation $Context 'listeners-remove' { $listeners | Remove-Item -Recurse -Force -ErrorAction Stop }
+    $rules = @(Invoke-WindowsFinalizationOperation $Context 'firewall-read' { Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build' })
+    Invoke-WindowsFinalizationOperation $Context 'firewall-remove' { $rules | Remove-NetFirewallRule -ErrorAction Stop }
+    Invoke-WindowsFinalizationOperation $Context 'token-policy-restore' { New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 0 -Force | Out-Null }
+    Invoke-WindowsFinalizationOperation $Context 'listeners-verify' { Assert-WindowsFinalizationWinRMService; if (@(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop).Count) { throw 'Build WinRM listener remains' } }
+    Invoke-WindowsFinalizationOperation $Context 'firewall-verify' { if (@(Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build').Count) { throw 'Build firewall rule remains' } }
+    Invoke-WindowsFinalizationOperation $Context 'token-policy-verify' { if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).LocalAccountTokenFilterPolicy -ne 0) { throw 'Build token policy was not restored' } }
+}
+
+function Invoke-WindowsImageSysprep {
+    & "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /quit /mode:vm
+    if ($LASTEXITCODE -ne 0) { throw [ComponentModel.Win32Exception]::new($LASTEXITCODE) }
+    $deadline = [DateTime]::UtcNow.AddMinutes(15)
+    while ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState -ne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Sysprep timed out' }
+        Start-Sleep -Seconds 10
+    }
+}
+
+function Complete-WindowsImageBuildIdentity {
+    param($Context)
+    $buildAccount = Invoke-WindowsFinalizationOperation $Context 'account-preflight' { Get-WindowsImageBuildAccount }
+    Invoke-WindowsFinalizationOperation $Context 'winrm-service-check' { Assert-WindowsFinalizationWinRMService }
+    $buildCertificate = Invoke-WindowsFinalizationOperation $Context 'certificate-preflight' { Get-WindowsImageBuildCertificate }
+    Invoke-WindowsFinalizationOperation $Context 'guest-agent-check' {
+        foreach ($service in Get-Service -Name RdAgent, WindowsAzureGuestAgent -ErrorAction Stop) {
+            if ($service.Status -ne 'Running') { throw 'Azure guest agent is not ready' }
+        }
+    }
+    # Local WSMan uses the caller identity. Complete its configuration work while
+    # that identity and TLS key are intact, before Server Sysprep clears credentials.
+    Remove-WindowsImageBuildRemoting -Context $Context
+    Invoke-WindowsFinalizationOperation $Context 'sysprep' { Invoke-WindowsImageSysprep }
+    $certificateCleanup = Invoke-WindowsFinalizationOperation $Context 'certificate-cleanup' { Remove-WindowsImageBuildCertificate -Identity $buildCertificate }
+    $accountCleanup = Invoke-WindowsFinalizationOperation $Context 'account-cleanup' { Remove-WindowsImageBuildAccount -Expected $buildAccount }
+    Invoke-WindowsFinalizationOperation $Context 'account-verify' { Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState }
+    return @{ account = $accountCleanup; certificate = $certificateCleanup; keyIdentity = @{ thumbprint = $buildCertificate.thumbprint; provider = $buildCertificate.provider; machineKey = $buildCertificate.machineKey; keyName = $buildCertificate.keyName; uniqueName = $buildCertificate.uniqueName } }
+}
+
 # Tests load only functions, without preparing the host.
 if ($MyInvocation.InvocationName -eq '.') { return }
 if ($RegisterTask) {
     Register-WindowsImageFinalizationTask -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath -AllowTemporaryBatchLogonAssignment:$AllowTemporaryBatchLogonAssignment
     return
 }
+$stateRoot = "$env:ProgramData\GitHubRunner"
+$context = @{ root = $stateRoot; attempt = $AttemptId; sha = $ExpectedScriptSHA256 }
+$operation = 'administrator-check'
+try {
 Assert-WindowsFinalizationAdministrator -ExpectedSID (Get-WindowsImageBuildAccount).sid
 
-$stateRoot = "$env:ProgramData\GitHubRunner"
+$operation = 'attempt-create'
 Start-WindowsImageFinalizationAttempt -Root $stateRoot -Attempt $AttemptId -SourceSHA256 $ExpectedScriptSHA256 -SourcePath $PSCommandPath -ExecutionSID (Get-WindowsFinalizationIdentity).User.Value
-Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'image-preflight'
+$operation = 'image-preflight'
+Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase $operation
 $runnerRoot = "$env:SystemDrive\actions-runner"
 $manifest = Get-Content -LiteralPath (Join-Path $stateRoot 'manifest.json') -Raw | ConvertFrom-Json
 foreach ($probe in @(
@@ -523,62 +673,43 @@ foreach ($probe in @(
 if ((Get-PSDrive C).Free -lt 15GB) { throw 'P10 image requires at least 15 GiB free after tool installation' }
 if ((Test-Path "$runnerRoot\.runner") -or (Test-Path "$stateRoot\started") -or (Test-Path "$env:SystemDrive\AzureData\CustomData.bin")) { throw 'Image must not contain registration, JIT, or one-shot runtime state' }
 
+$operation = 'runtime-task-create'
 # Jobs use SYSTEM in a disposable VM. No interactive desktop session is provided.
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument "-NoLogo -NoProfile -NonInteractive -File `"$stateRoot\Start-WindowsRunner.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
 Register-ScheduledTask -TaskName 'GitHubEphemeralRunner' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+$operation = 'maintenance-policy'
 # Images are refreshed for security patches; update scans must not interrupt jobs.
 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -PropertyType DWord -Value 1 -Force | Out-Null
-# Record the identity before generalization. No new password is generated,
-# read, or transmitted; Server Sysprep clears the built-in password.
-$buildAccount = Get-WindowsImageBuildAccount
-$buildCertificate = Get-WindowsImageBuildCertificate
-foreach ($service in Get-Service -Name RdAgent, WindowsAzureGuestAgent -ErrorAction Stop) {
-    if ($service.Status -ne 'Running') { throw "Azure guest agent is not ready: $($service.Name)" }
-}
-Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'sysprep'
-& "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /quit /mode:vm
-if ($LASTEXITCODE -ne 0) { throw 'Sysprep failed' }
-$deadline = [DateTime]::UtcNow.AddMinutes(15)
-while ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState -ne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
-    if ([DateTime]::UtcNow -ge $deadline) { throw 'Sysprep timed out' }
-    Start-Sleep -Seconds 10
-}
-# Remove the recorded build key before changing the account context. Sysprep can
-# change key availability; no missing-key or access error is assumed successful.
-Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'certificate-cleanup'
-$certificateCleanup = Remove-WindowsImageBuildCertificate -Identity $buildCertificate
-# Retire the identity only after Sysprep polling, before the final command exits.
-# The managed command uses the VM agent, independently of the retired account.
-Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'account-cleanup'
-$accountCleanup = Remove-WindowsImageBuildAccount -Expected $buildAccount
-Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
+$operation = 'identity-cleanup'
+$cleanup = Complete-WindowsImageBuildIdentity -Context $context
+$accountCleanup = $cleanup.account
+$certificateCleanup = $cleanup.certificate
+$operation = 'manifest-publish'
 $manifest | Add-Member -NotePropertyName imageAccountCleanup -NotePropertyValue @{ mode = $accountCleanup.mode; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; serverSysprepCompleted = $true; buildAccountAbsent = $true } -Force
 $manifest | Add-Member -NotePropertyName imageCertificateCleanup -NotePropertyValue $certificateCleanup -Force
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stateRoot 'manifest.json')
-Write-Host "Image build account retired; mode: $($accountCleanup.mode); Server Sysprep completed."
-
-# Completion travels over the VM agent, so retiring WinRM cannot acknowledge
-# success accidentally. Every readback must succeed before publishing proof.
-Write-WindowsImageFinalizationPhase -Root $stateRoot -Phase 'remoting-cleanup'
-Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop | Remove-Item -Recurse -Force -ErrorAction Stop
-Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build' | Remove-NetFirewallRule -ErrorAction Stop
-New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 0 -Force | Out-Null
-if (@(Get-ChildItem WSMan:\localhost\Listener -ErrorAction Stop).Count) { throw 'Build WinRM listener remains' }
-if (@(Get-NetFirewallRule -ErrorAction Stop | Where-Object Name -eq 'WINRM-Packer-Build').Count) { throw 'Build firewall rule remains' }
-if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).LocalAccountTokenFilterPolicy -ne 0) { throw 'Build token policy was not restored' }
+$operation = 'runtime-task-read'
 $runtimeTask = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop
-if ($runtimeTask.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $runtimeTask.State -eq 'Disabled') { throw 'Runtime SYSTEM startup task is missing or disabled' }
+$operation = 'runtime-task-verify'
+Assert-WindowsRuntimeTask -Task $runtimeTask
+$operation = 'generalization-read'
 $generalizationState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
+$operation = 'account-verify'
 Assert-WindowsImageAccountCleanup -Cleanup $accountCleanup -GeneralizationState $generalizationState
+$operation = 'completion-publish'
 Complete-WindowsImageFinalizationAttempt -Root $stateRoot -Record @{
     schemaVersion = 1; attemptId = $AttemptId; scriptSHA256 = $ExpectedScriptSHA256; status = 'Succeeded'
     sysprepState = $generalizationState; buildAccountRetired = $true
     privateKeyAbsent = $certificateCleanup.privateKeyAbsent; certificateAbsent = $certificateCleanup.certificateAbsent
     winrmListenersAbsent = $true; buildFirewallRuleAbsent = $true; tokenPolicyRestored = $true; runtimeTaskPresent = $true
-    accountCleanup = $accountCleanup
-    keyIdentity = @{ thumbprint = $buildCertificate.thumbprint; provider = $buildCertificate.provider; machineKey = $buildCertificate.machineKey; keyName = $buildCertificate.keyName; uniqueName = $buildCertificate.uniqueName }
+    accountCleanup = $accountCleanup; keyIdentity = $cleanup.keyIdentity
+}
+} catch {
+    try { Save-WindowsFinalizationFailure -Context $context -Operation $operation -Failure $_ }
+    catch { Write-Warning 'Finalization failure metadata could not be saved.' }
+    throw
 }

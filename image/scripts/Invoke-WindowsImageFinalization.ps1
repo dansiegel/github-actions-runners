@@ -91,6 +91,24 @@ function Read-WindowsFinalizationProof {
     return $proof
 }
 
+
+function Read-WindowsFinalizationFailureOutput {
+    param([string] $Output, [string] $ExpectedAttempt, [string] $ExpectedSHA256)
+    $lines = @($Output -split '\r?\n' | Where-Object { $_.StartsWith('GHA_IMAGE_FINALIZATION_FAILURE ') })
+    if (-not $lines.Count) { return }
+    $line = $lines[0]
+    if ($line.Length -gt 2048) { throw 'Oversized managed failure evidence' }
+    $record = $line.Substring('GHA_IMAGE_FINALIZATION_FAILURE '.Length) | ConvertFrom-Json
+    $operations = @('administrator-check', 'attempt-create', 'image-preflight', 'runtime-task-create', 'maintenance-policy', 'identity-cleanup', 'account-preflight', 'certificate-preflight', 'guest-agent-check', 'winrm-service-check', 'listeners-read', 'listeners-remove', 'firewall-read', 'firewall-remove', 'token-policy-restore', 'listeners-verify', 'firewall-verify', 'token-policy-verify', 'sysprep', 'certificate-cleanup', 'account-cleanup', 'account-verify', 'manifest-publish', 'runtime-task-read', 'runtime-task-verify', 'generalization-read', 'completion-publish', 'observer-task', 'observer-state', 'observer-cleanup')
+    if ($record.schemaVersion -ne 1 -or $record.status -cne 'Failed' -or $record.attemptId -cne $ExpectedAttempt -or $record.scriptSHA256 -cne $ExpectedSHA256 -or $record.operation -cnotin $operations -or ($record.sourceLine -isnot [int] -and $record.sourceLine -isnot [long]) -or $record.sourceLine -lt 0 -or $record.sourceLine -gt 100000 -or ($record.category -isnot [int] -and $record.category -isnot [long]) -or $record.category -lt 0 -or $record.category -gt 31 -or @($record.errors).Count -notin @(1, 2, 3)) { throw 'Invalid or mismatched managed failure evidence' }
+    $errors = @()
+    foreach ($entry in $record.errors) {
+        if (($entry.hresult -isnot [int] -and $entry.hresult -isnot [long]) -or $entry.hresult -lt [int]::MinValue -or $entry.hresult -gt [int]::MaxValue -or $entry.type -cnotin @('System.Exception', 'System.InvalidOperationException', 'System.UnauthorizedAccessException', 'System.ComponentModel.Win32Exception', 'System.Runtime.InteropServices.COMException', 'System.Security.Cryptography.CryptographicException', 'System.Management.Automation.RuntimeException', 'System.Management.Automation.CmdletInvocationException', 'System.Management.Automation.MethodInvocationException', 'System.Management.Automation.ItemNotFoundException', 'Microsoft.Management.Infrastructure.CimException', 'Other')) { throw 'Invalid managed failure exception metadata' }
+        $errors += @{ type = $entry.type; hresult = $entry.hresult }
+    }
+    return [pscustomobject]@{ schemaVersion = 1; status = 'Failed'; attemptId = $record.attemptId; scriptSHA256 = $record.scriptSHA256; operation = $record.operation; sourceLine = $record.sourceLine; category = $record.category; errors = $errors }
+}
+
 function Remove-WindowsFinalizationCommand {
     param([string] $Uri, [string] $ExpectedAttempt, [string] $ExpectedSHA256)
     $deadline = (Get-WindowsFinalizationTime).AddSeconds(120)
@@ -158,6 +176,8 @@ Write-Output ('GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Depth 5 -Co
     $ownsCommand = $false
     $failure = $null
     $lastPhase = 'not-reported'
+    $failureEvidenceEmitted = $false
+    $failureEvidenceInvalid = $false
     try {
         $existing = $null
         try { $existing = Invoke-WindowsImageRest GET $readUri $null }
@@ -187,6 +207,16 @@ Write-Output ('GHA_IMAGE_FINALIZATION ' + ($record | ConvertTo-Json -Depth 5 -Co
                 $lastPhase = $phase[0]
                 Write-Host "$((Get-WindowsFinalizationTime).ToString('o')) $lastPhase"
             }
+            if (-not $failureEvidenceEmitted) {
+                try {
+                    $failureRecord = Read-WindowsFinalizationFailureOutput -Output ([string](Get-FinalizationProperty $view 'output')) -ExpectedAttempt $Attempt -ExpectedSHA256 $SourceSHA256
+                    if ($null -ne $failureRecord) {
+                        Write-Host ('GHA_IMAGE_FINALIZATION_FAILURE_VERIFIED ' + ($failureRecord | ConvertTo-Json -Depth 5 -Compress))
+                        $failureEvidenceEmitted = $true
+                    }
+                } catch { $failureEvidenceInvalid = $true; Write-Warning 'Managed failure metadata is invalid; it is not completion proof.' }
+            }
+            if ($state -ceq 'Succeeded' -and ($failureEvidenceEmitted -or $failureEvidenceInvalid)) { throw 'Managed success conflicts with finalization failure evidence' }
             if ($state -ceq 'Succeeded') { return Read-WindowsFinalizationProof -Command $command -ExpectedAttempt $Attempt -ExpectedSHA256 $SourceSHA256 }
             if ($state -in @('Failed', 'TimedOut', 'Canceled') -or (Get-FinalizationProperty $command.properties 'provisioningState') -eq 'Failed') {
                 # Preserve only our fixed phase labels, not raw guest errors or
