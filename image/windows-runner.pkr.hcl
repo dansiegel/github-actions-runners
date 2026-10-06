@@ -42,6 +42,14 @@ variable "allow_temporary_batch_logon_assignment" {
     error_message = "Approve Task Scheduler's possible explicit batch-logon assignment for the existing build administrator and restoration of the exact baseline before setting allow_temporary_batch_logon_assignment=true."
   }
 }
+variable "build_vm_size" {
+  type    = string
+  default = "Standard_D2s_v5"
+  validation {
+    condition     = contains(["Standard_D2s_v5", "Standard_D4s_v5"], var.build_vm_size)
+    error_message = "Use a D2s_v5 or D4s_v5 image builder; this does not change runtime profile hardware."
+  }
+}
 variable "runner_version" {
   type    = string
   default = "2.337.0"
@@ -67,7 +75,7 @@ source "azure-arm" "windows_runner" {
   image_offer                        = "WindowsServer"
   image_sku                          = "2025-datacenter-g2"
   image_version                      = var.base_image_version
-  vm_size                            = "Standard_D4s_v5"
+  vm_size                            = var.build_vm_size
   os_disk_size_gb                    = 128
   communicator                       = "winrm"
   skip_create_build_key_vault        = true

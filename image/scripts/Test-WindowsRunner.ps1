@@ -365,7 +365,11 @@ function Test-WindowsAdministratorFinalization {
     function Get-ScheduledTask {
         [CmdletBinding()] param($TaskName)
         $runtime = [pscustomobject]@{ TaskName = 'GitHubEphemeralRunner'; Principal = [pscustomobject]@{ UserId = 'SYSTEM' }; State = 'Ready' }
-        if ($TaskName -eq 'GitHubEphemeralRunner') { return $runtime }
+        if ($TaskName -eq 'GitHubEphemeralRunner') {
+            if ($fixture.scenario -eq 'runtime-missing') { throw 'Runtime task disappeared after worker cleanup' }
+            if ($fixture.scenario -eq 'runtime-wrong-principal') { $runtime.Principal.UserId = 'S-1-5-21-1-2-3-1001' }
+            return $runtime
+        }
         if ($TaskName) { if (-not $fixture.exists) { throw 'Task missing' }; return $fixture.task }
         if ($fixture.exists) { $fixture.task }
         $runtime
@@ -399,7 +403,7 @@ function Test-WindowsAdministratorFinalization {
                 if ($fixture.registrations -ne 1 -or $fixture.runs) { throw 'Staging replay changed or launched the task' }
             }
         }
-        foreach ($scenario in @('normal', 'bad-principal', 'bad-action', 'unbounded', 'restart', 'parallel', 'no-hard-terminate', 'trigger', 'nonzero-task', 'unchanged-run', 'task-running', 'missing-completion', 'wrong-execution-sid', 'incomplete-sysprep', 'account-remains', 'key-remains', 'key-file-remains', 'certificate-remains', 'firewall-remains', 'token-policy-remains', 'delete-no-op', 'source-remains', 'policy-not-restored')) {
+        foreach ($scenario in @('normal', 'bad-principal', 'bad-action', 'unbounded', 'restart', 'parallel', 'no-hard-terminate', 'trigger', 'nonzero-task', 'unchanged-run', 'task-running', 'missing-completion', 'wrong-execution-sid', 'incomplete-sysprep', 'account-remains', 'key-remains', 'key-file-remains', 'certificate-remains', 'firewall-remains', 'token-policy-remains', 'delete-no-op', 'source-remains', 'policy-not-restored', 'runtime-missing', 'runtime-wrong-principal')) {
             if (Test-Path -LiteralPath $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force }
             New-Item -ItemType Directory -Path $root | Out-Null
             $fixture.scenario = $scenario; $fixture.system = $true; $fixture.exists = $true; $fixture.runs = 0; $fixture.ran = $false; $fixture.now = [DateTime]::UtcNow
@@ -502,6 +506,11 @@ function Test-WindowsFinalizationCleanupOrder {
         $order.Add($Phase)
         if ($orderState.fail -ceq $Phase) { throw 'SIMULATED_PRIVATE_FAILURE' }
     }
+    function Get-ScheduledTask {
+        [CmdletBinding()] param($TaskName)
+        if ($TaskName -cne 'GitHubEphemeralRunner' -or $orderState.retired -or $orderState.generalized) { throw 'Worker read the startup task after identity cleanup' }
+        return [pscustomobject]@{ Principal = [pscustomobject]@{ UserId = 'SYSTEM' }; State = 'Ready' }
+    }
     function Get-WindowsImageBuildAccount { return [pscustomobject]@{ mode = 'BuiltinAdministrator'; sid = 'S-1-5-21-1-2-3-500' } }
     function Get-WindowsImageBuildCertificate { return [pscustomobject]@{ thumbprint = ('A' * 40); provider = 'Microsoft Software Key Storage Provider'; machineKey = $true; keyName = 'owned'; uniqueName = 'owned-file' } }
     function Get-Service { [CmdletBinding()] param($Name) return [pscustomobject]@{ Status = 'Running' } }
@@ -519,21 +528,21 @@ function Test-WindowsFinalizationCleanupOrder {
     function Remove-WindowsImageBuildAccount { param($Expected) if (-not $orderState.generalized) { throw 'Account retirement preceded Sysprep' }; $orderState.retired = $true; return $Expected }
     function Assert-WindowsImageAccountCleanup { param($Cleanup, $GeneralizationState) if (-not $orderState.retired) { throw 'Account cleanup missing' } }
     try {
-        foreach ($fail in @('', 'winrm-service-check', 'listeners-read', 'listeners-remove', 'firewall-read', 'firewall-remove', 'token-policy-restore', 'listeners-verify', 'firewall-verify', 'token-policy-verify')) {
+        foreach ($fail in @('', 'runtime-task-read', 'runtime-task-verify', 'winrm-service-check', 'listeners-read', 'listeners-remove', 'firewall-read', 'firewall-remove', 'token-policy-restore', 'listeners-verify', 'firewall-verify', 'token-policy-verify')) {
             if (Test-Path $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force }
             New-Item -ItemType Directory -Path $root | Out-Null
             $order.Clear(); $orderState.fail = $fail; $orderState.listeners = $true; $orderState.firewall = $true; $orderState.token = 1; $orderState.retired = $false; $orderState.generalized = $false
             $rejected = $false
             try { $result = Complete-WindowsImageBuildIdentity -Context $context } catch { $rejected = $true }
             if (-not $fail) {
-                if ($rejected -or -not $orderState.retired -or -not $result.certificate.privateKeyAbsent -or $order.IndexOf('token-policy-verify') -gt $order.IndexOf('sysprep')) { throw 'Successful cleanup order changed' }
+                if ($rejected -or -not $orderState.retired -or -not $result.certificate.privateKeyAbsent -or $order.IndexOf('runtime-task-verify') -gt $order.IndexOf('sysprep') -or $order.IndexOf('token-policy-verify') -gt $order.IndexOf('sysprep')) { throw 'Successful cleanup order changed' }
             } else {
                 if (-not $rejected -or $orderState.generalized -or $orderState.retired) { throw "Failed remoting step continued to Sysprep: $fail" }
                 if ((Read-WindowsFinalizationFailure -Context $context).operation -cne $fail) { throw "Failure lost its exact operation: $fail" }
             }
         }
     } finally { if (Test-Path $root) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force } }
-    Write-Output 'Remoting cleanup/readbacks precede Sysprep, key cleanup, and account retirement; failed steps cannot continue.'
+    Write-Output 'Worker startup-task validation and remoting readbacks precede Sysprep/account retirement; failed steps cannot continue.'
 }
 Test-WindowsFinalizationCleanupOrder
 

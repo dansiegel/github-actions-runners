@@ -624,6 +624,11 @@ function Invoke-WindowsImageSysprep {
 
 function Complete-WindowsImageBuildIdentity {
     param($Context)
+    # Task Scheduler reads use the worker's administrator context. Validate the
+    # startup task before Sysprep/account retirement; SYSTEM verifies it again
+    # independently after the worker exits, before any image can be captured.
+    $runtimeTask = Invoke-WindowsFinalizationOperation $Context 'runtime-task-read' { Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop }
+    Invoke-WindowsFinalizationOperation $Context 'runtime-task-verify' { Assert-WindowsRuntimeTask -Task $runtimeTask }
     $buildAccount = Invoke-WindowsFinalizationOperation $Context 'account-preflight' { Get-WindowsImageBuildAccount }
     Invoke-WindowsFinalizationOperation $Context 'winrm-service-check' { Assert-WindowsFinalizationWinRMService }
     $buildCertificate = Invoke-WindowsFinalizationOperation $Context 'certificate-preflight' { Get-WindowsImageBuildCertificate }
@@ -692,10 +697,6 @@ $operation = 'manifest-publish'
 $manifest | Add-Member -NotePropertyName imageAccountCleanup -NotePropertyValue @{ mode = $accountCleanup.mode; sysprepState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; serverSysprepCompleted = $true; buildAccountAbsent = $true } -Force
 $manifest | Add-Member -NotePropertyName imageCertificateCleanup -NotePropertyValue $certificateCleanup -Force
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stateRoot 'manifest.json')
-$operation = 'runtime-task-read'
-$runtimeTask = Get-ScheduledTask -TaskName 'GitHubEphemeralRunner' -ErrorAction Stop
-$operation = 'runtime-task-verify'
-Assert-WindowsRuntimeTask -Task $runtimeTask
 $operation = 'generalization-read'
 $generalizationState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
 $operation = 'account-verify'
