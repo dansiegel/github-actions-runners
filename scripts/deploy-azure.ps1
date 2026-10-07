@@ -123,6 +123,24 @@ function Get-NormalizedRunnerPools {
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
         $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+        $windowsProfiles = @{
+            m = @('Standard_D2s_v5', 'P10'); mp = @('Standard_D2s_v5', 'P20')
+            l = @('Standard_D4s_v5', 'P10'); lp = @('Standard_D4s_v5', 'P20')
+            xl = @('Standard_D8s_v5', 'P10'); xlp = @('Standard_D8s_v5', 'P20')
+        }
+        $effectiveTier = if ($osDiskTier) { $osDiskTier } else { 'P10' }
+        if ($osLabel -ceq 'Windows' -and ($vmSize -cnotin @('Standard_D2s_v5', 'Standard_D4s_v5', 'Standard_D8s_v5') -or $effectiveTier -cnotin @('P10', 'P20'))) {
+            throw "Unsupported Windows hardware/disk combination for '$name'"
+        }
+        foreach ($value in (@($name) + $labels)) {
+            if ($value -imatch '^avp-windows-(.*)$') {
+                $profile = $windowsProfiles[$Matches[1].ToLowerInvariant()]
+                if ($null -eq $profile) { throw "Unsupported Windows profile '$value': use M/MP, L/LP, or XL/XLP" }
+                if ($osLabel -cne 'Windows' -or $vmSize -cne $profile[0] -or $effectiveTier -cne $profile[1]) {
+                    throw "Windows profile hardware/disk/OS mismatch for '$value'"
+                }
+            }
+        }
         $profileLabelCount = 0
         foreach ($label in $labels) {
             if ($label -in @('Linux', 'Windows', 'macOS')) {

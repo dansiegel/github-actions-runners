@@ -44,7 +44,7 @@ function Test-PoolDryRun {
             }
         }
     }
-    if ($IsLinux) {
+    if ($IsLinux -or $IsMacOS) {
         $output = & bash (Join-Path $PSScriptRoot 'deploy-azure.sh') --dry-run `
             --subscription-id 00000000-0000-0000-0000-000000000000 --github-organization ExampleOrg --runner-pools-file $poolFile 2>&1
         if (($LASTEXITCODE -eq 0) -ne $Valid) { throw "Bash validation mismatch for ${Name}: $output" }
@@ -102,7 +102,7 @@ try {
         $output = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'deploy-azure.ps1') `
             -SubscriptionId 00000000-0000-0000-0000-000000000000 -GitHubOrganization ExampleOrg -RunnerMaxCapacity $maximum 2>&1
         if (($LASTEXITCODE -eq 0) -ne $valid) { throw "PowerShell shorthand maximum validation mismatch for ${maximum}: $output" }
-        if ($IsLinux) {
+        if ($IsLinux -or $IsMacOS) {
             $output = & bash (Join-Path $PSScriptRoot 'deploy-azure.sh') --dry-run `
                 --subscription-id 00000000-0000-0000-0000-000000000000 --github-organization ExampleOrg --runner-max-capacity $maximum 2>&1
             if (($LASTEXITCODE -eq 0) -ne $valid) { throw "Bash shorthand maximum validation mismatch for ${maximum}: $output" }
@@ -142,6 +142,30 @@ try {
     }
     Test-PoolDryRun -Name 'Windows requires a qualified image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows' }) -Valid $false
     Test-PoolDryRun -Name 'qualified Windows image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows' }) -Expected @('pool imageId override')
+    foreach ($profile in @(@('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
+        foreach ($premium in @($false, $true)) {
+            $label = 'avp-windows-' + $profile[0] + $(if ($premium) { 'p' } else { '' })
+            $tier = if ($premium) { 'P20' } else { 'P10' }
+            Test-PoolDryRun -Name "supported $label" -Pools @(@{ name = $label; vmSize = $profile[1]; osDiskTier = $tier; osType = 'Windows'; imageId = '/qualified/windows' })
+        }
+    }
+    foreach ($invalid in @(
+        @{ name = 'avp-windows-s'; vmSize = 'Standard_F1als_v7'; osDiskTier = 'P10' },
+        @{ name = 'AVP-WINDOWS-SP'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P20' },
+        @{ name = 'custom'; vmSize = 'Standard_D16s_v5'; osDiskTier = 'P20' },
+        @{ name = 'custom'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P15' },
+        @{ name = 'custom'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P30' },
+        @{ name = 'avp-windows-lp'; vmSize = 'Standard_D2s_v5'; osDiskTier = 'P20' },
+        @{ name = 'avp-windows-lp'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P10' },
+        @{ name = 'avp-windows-s'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P10'; labels = @('custom') }
+    )) {
+        $invalid.osType = 'Windows'
+        $invalid.imageId = '/qualified/windows'
+        Test-PoolDryRun -Name 'unsupported Windows combination' -Pools @($invalid) -Valid $false
+        $invalid.enabled = $false
+        Test-PoolDryRun -Name 'unsupported disabled Windows combination' -Pools @(@{ name = 'linux'; vmSize = 'Standard_D4s_v5' }, $invalid) -Valid $false
+    }
+    Test-PoolDryRun -Name 'Windows label cannot route to Linux' -Pools @(@{ name = 'linux'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P20'; labels = @('avp-windows-lp') }) -Valid $false
     Test-PoolDryRun -Name 'plaintext password rejected' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; adminPassword = 'not-accepted' }) -Valid $false
     foreach ($os in @($null, 'windows', '', 1, $true)) {
         Test-PoolDryRun -Name 'invalid OS type' -Pools @(@{ name = 'invalid'; vmSize = 'Standard_D4s_v5'; osType = $os }) -Valid $false

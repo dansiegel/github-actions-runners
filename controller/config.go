@@ -235,6 +235,9 @@ func (c *Config) validate(requireImage bool) error {
 	if _, err := c.EffectiveOSDiskSizeGB(); err != nil {
 		return err
 	}
+	if err := c.validateWindowsProfile(); err != nil {
+		return err
+	}
 	if c.ProvisionConcurrency < 1 {
 		return fmt.Errorf("PROVISION_CONCURRENCY must be positive")
 	}
