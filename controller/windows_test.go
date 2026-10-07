@@ -85,7 +85,7 @@ func TestOperatingSystemTagsPreserveUniqueProfileRouting(t *testing.T) {
     c.Pools = []RunnerPool{
         {Name:"legacy", VMSize:"Standard_D4s_v5", Labels:[]string{"avp-linux","avp-linux-l"}},
         {Name:"medium", VMSize:"Standard_D2s_v5", Labels:[]string{"avp-linux-m","linux"}},
-        {Name:"windows", VMSize:"Standard_D4s_v5", OSType:"Windows", ImageID:"/images/windows", Labels:[]string{"avp-windows-lp","WINDOWS"}},
+        {Name:"windows", VMSize:"Standard_D4s_v5", OSDiskTier:"P20", OSType:"Windows", ImageID:"/images/windows", Labels:[]string{"avp-windows-lp","WINDOWS"}},
     }
     pools,err := c.PoolConfigs()
     if err != nil {t.Fatal(err)}

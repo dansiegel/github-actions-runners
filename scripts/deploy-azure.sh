@@ -113,8 +113,23 @@ fi
 # enablement change cannot introduce an ambiguous label later.
 RUNNER_POOLS_JSON="$(jq -ce '
   def is_os: . == "linux" or . == "windows" or . == "macos";
+  def windows_profiles: {
+    m: ["Standard_D2s_v5", "P10"], mp: ["Standard_D2s_v5", "P20"],
+    l: ["Standard_D4s_v5", "P10"], lp: ["Standard_D4s_v5", "P20"],
+    xl: ["Standard_D8s_v5", "P10"], xlp: ["Standard_D8s_v5", "P20"]
+  };
   map(. as $pool
     | (.osType // "Linux" | ascii_downcase) as $os
+    | (if .osDiskTier == "" then "P10" else .osDiskTier end) as $tier
+    | if $os == "windows" and ((["Standard_D2s_v5", "Standard_D4s_v5", "Standard_D8s_v5"] | index($pool.vmSize)) == null or ($tier != "P10" and $tier != "P20")) then error("unsupported Windows hardware/disk combination for " + .name) else . end
+    | reduce ([.name] + .labels)[] as $value (.;
+        ($value | ascii_downcase) as $label
+        | if ($label | startswith("avp-windows-")) then
+            (windows_profiles[$label | ltrimstr("avp-windows-")]) as $profile
+            | if $profile == null then error("unsupported Windows profile " + $value)
+              elif $os != "windows" or $pool.vmSize != $profile[0] or $tier != $profile[1] then error("Windows profile hardware/disk/OS mismatch for " + $value)
+              else . end
+          else . end)
     | if any(.labels[]; ascii_downcase as $label | ($label | is_os) and $label != $os) then error("OS label conflicts with osType for " + .name) else . end
     | if all(.labels[]; ascii_downcase | is_os) then error("a profile label is required in addition to the operating system") else . end
   )
