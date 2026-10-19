@@ -31,10 +31,10 @@ type runnerLifecycle string
 
 const (
 	runnerProvisioning runnerLifecycle = "provisioning"
-	runnerIdle     runnerLifecycle = "idle"
-	runnerBusy     runnerLifecycle = "busy"
-	runnerUnknown  runnerLifecycle = "unknown"
-	runnerDeleting runnerLifecycle = "deleting"
+	runnerIdle         runnerLifecycle = "idle"
+	runnerBusy         runnerLifecycle = "busy"
+	runnerUnknown      runnerLifecycle = "unknown"
+	runnerDeleting     runnerLifecycle = "deleting"
 )
 
 type runnerEntry struct {
@@ -48,10 +48,12 @@ type runnerEntry struct {
 }
 
 type runnerState struct {
-	mu      sync.Mutex
-	runners map[string]runnerEntry
-	desired int
-	deleted map[string]time.Time
+	mu               sync.Mutex
+	runners          map[string]runnerEntry
+	desired          int
+	assigned         int
+	completedPending int
+	deleted          map[string]time.Time
 }
 
 func newRunnerState() *runnerState {
@@ -91,9 +93,22 @@ func (s *runnerState) addIdle(vm RunnerVM) {
 }
 
 func (s *runnerState) setDesired(count int) {
+	s.updateDesired(count, 0)
+}
+
+func (s *runnerState) updateDesired(assigned, cap int) int {
 	s.mu.Lock()
-	s.desired = count
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	assigned = max(0, assigned)
+	// Retain completion corrections across repeated stale statistics (including
+	// nil SDK messages). A falling assignment count acknowledges completions.
+	s.completedPending = max(0, s.completedPending-max(0, s.assigned-assigned))
+	s.assigned = assigned
+	s.desired = max(0, assigned-s.completedPending)
+	if cap > 0 {
+		s.desired = min(cap, s.desired)
+	}
+	return s.desired
 }
 
 func (s *runnerState) reserve(name string, cap int) bool {
@@ -115,7 +130,7 @@ func (s *runnerState) reserve(name string, cap int) bool {
 		return false
 	}
 	s.runners[name] = runnerEntry{
-		RunnerVM: RunnerVM{RunnerName: name, VMName: azureResourceName(name), CreatedAt: time.Now().UTC()},
+		RunnerVM:  RunnerVM{RunnerName: name, VMName: azureResourceName(name), CreatedAt: time.Now().UTC()},
 		Lifecycle: runnerProvisioning, Provisioning: true,
 	}
 	return true
@@ -157,7 +172,8 @@ func (s *runnerState) markCompleted(name string) bool {
 	s.runners[name] = entry
 	// The SDK delivers completion before the message's updated statistics.
 	// Avoid a replacement based on that short-lived stale desired count.
-	s.desired = max(0, s.desired-1)
+	s.completedPending = min(s.assigned, s.completedPending+1)
+	s.desired = min(s.desired, max(0, s.assigned-s.completedPending))
 	return true
 }
 
@@ -339,11 +355,7 @@ type AzureScaler struct {
 }
 
 func (s *AzureScaler) HandleDesiredRunnerCount(ctx context.Context, assignedJobs int) (int, error) {
-	target := max(0, assignedJobs)
-	if s.config.MaxRunners > 0 {
-		target = min(s.config.MaxRunners, target)
-	}
-	s.state.setDesired(target)
+	target := s.state.updateDesired(assignedJobs, s.config.MaxRunners)
 	current := s.state.activeCount()
 	s.logger.Info("Reconciling desired runner capacity", "assignedJobs", assignedJobs, "current", current, "target", target, "max", s.config.MaxRunners)
 

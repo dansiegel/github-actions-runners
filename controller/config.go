@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	defaultARMEndpoint = "https://management.azure.com"
-	defaultRunnerUser  = "actions-runner"
+	defaultARMEndpoint         = "https://management.azure.com"
+	defaultRunnerUser          = "actions-runner"
 	defaultWindowsRunnerSHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
+	maxProvisionConcurrency    = 32
 )
 
 type Config struct {
@@ -42,12 +43,12 @@ type Config struct {
 	VMPriority     string
 	PublicIP       bool
 
-	RunnerVersion string
-	RunnerSHA256  string
+	RunnerVersion       string
+	RunnerSHA256        string
 	WindowsRunnerSHA256 string
-	RunnerUser    string
-	OSDiskSizeGB  int
-	OSDiskTier    string
+	RunnerUser          string
+	OSDiskSizeGB        int
+	OSDiskTier          string
 
 	ProvisionConcurrency int
 	ReconcileInterval    time.Duration
@@ -83,42 +84,46 @@ func (p *RunnerPool) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true, "osType":true}
+	allowed := map[string]bool{"name": true, "vmSize": true, "maxRunners": true, "priority": true, "labels": true, "osDiskTier": true, "enabled": true, "imageId": true, "osType": true}
 	for key := range fields {
-		if !allowed[key] { return fmt.Errorf("unknown runner pool field %q", key) }
+		if !allowed[key] {
+			return fmt.Errorf("unknown runner pool field %q", key)
+		}
 	}
 	for _, key := range []string{"maxRunners", "enabled", "imageId", "osType"} {
 		if value, present := fields[key]; present && strings.TrimSpace(string(value)) == "null" {
 			return fmt.Errorf("%s cannot be null", key)
 		}
 	}
-	if _, present := fields["osType"]; present && decoded.OSType != "Linux" && decoded.OSType != "Windows" { return fmt.Errorf("osType must be Linux or Windows") }
+	if _, present := fields["osType"]; present && decoded.OSType != "Linux" && decoded.OSType != "Windows" {
+		return fmt.Errorf("osType must be Linux or Windows")
+	}
 	*p = RunnerPool(decoded)
 	return nil
 }
 
 func LoadConfig() (Config, error) {
 	c := Config{
-		RegistrationURL: env("GITHUB_CONFIG_URL", ""),
-		ScaleSetName:    env("RUNNER_SCALE_SET_NAME", ""),
-		RunnerGroup:     env("RUNNER_GROUP", scaleset.DefaultRunnerGroup),
-		Labels:          splitCSV(env("RUNNER_LABELS", "")),
-		SubscriptionID:  env("AZURE_SUBSCRIPTION_ID", ""),
-		ResourceGroup:   env("AZURE_RESOURCE_GROUP", ""),
-		Location:        env("AZURE_LOCATION", ""),
-		SubnetID:        env("RUNNER_SUBNET_ID", ""),
-		VMSize:          env("RUNNER_VM_SIZE", "Standard_D4s_v5"),
-		ImageID:         env("RUNNER_IMAGE_ID", ""),
-		VMAdminUser:     env("RUNNER_ADMIN_USERNAME", "azureuser"),
-		VMSSHPublicKey:  env("RUNNER_ADMIN_SSH_PUBLIC_KEY", ""),
-		VMPriority:      env("RUNNER_VM_PRIORITY", "Regular"),
-		RunnerVersion:   env("RUNNER_VERSION", "2.337.0"),
-		RunnerSHA256:    env("RUNNER_SHA256", "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"),
+		RegistrationURL:     env("GITHUB_CONFIG_URL", ""),
+		ScaleSetName:        env("RUNNER_SCALE_SET_NAME", ""),
+		RunnerGroup:         env("RUNNER_GROUP", scaleset.DefaultRunnerGroup),
+		Labels:              splitCSV(env("RUNNER_LABELS", "")),
+		SubscriptionID:      env("AZURE_SUBSCRIPTION_ID", ""),
+		ResourceGroup:       env("AZURE_RESOURCE_GROUP", ""),
+		Location:            env("AZURE_LOCATION", ""),
+		SubnetID:            env("RUNNER_SUBNET_ID", ""),
+		VMSize:              env("RUNNER_VM_SIZE", "Standard_D4s_v5"),
+		ImageID:             env("RUNNER_IMAGE_ID", ""),
+		VMAdminUser:         env("RUNNER_ADMIN_USERNAME", "azureuser"),
+		VMSSHPublicKey:      env("RUNNER_ADMIN_SSH_PUBLIC_KEY", ""),
+		VMPriority:          env("RUNNER_VM_PRIORITY", "Regular"),
+		RunnerVersion:       env("RUNNER_VERSION", "2.337.0"),
+		RunnerSHA256:        env("RUNNER_SHA256", "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"),
 		WindowsRunnerSHA256: env("WINDOWS_RUNNER_SHA256", defaultWindowsRunnerSHA256),
-		RunnerUser:      env("RUNNER_USER", defaultRunnerUser),
-		OSDiskTier:      env("RUNNER_OS_DISK_TIER", ""),
-		ARMEndpoint:     strings.TrimRight(env("AZURE_ARM_ENDPOINT", defaultARMEndpoint), "/"),
-		LogLevel:        env("LOG_LEVEL", "info"),
+		RunnerUser:          env("RUNNER_USER", defaultRunnerUser),
+		OSDiskTier:          env("RUNNER_OS_DISK_TIER", ""),
+		ARMEndpoint:         strings.TrimRight(env("AZURE_ARM_ENDPOINT", defaultARMEndpoint), "/"),
+		LogLevel:            env("LOG_LEVEL", "info"),
 		GitHubApp: scaleset.GitHubAppAuth{
 			ClientID:   env("GITHUB_APP_CLIENT_ID", ""),
 			PrivateKey: normalizePEM(env("GITHUB_APP_PRIVATE_KEY", "")),
@@ -174,7 +179,9 @@ func (c *Config) validate(requireImage bool) error {
 		_, err := c.PoolConfigs()
 		return err
 	}
-	if c.OSType == "" { c.OSType = "Linux" }
+	if c.OSType == "" {
+		c.OSType = "Linux"
+	}
 	if c.OSType != "Linux" && c.OSType != "Windows" {
 		return fmt.Errorf("osType must be Linux or Windows")
 	}
@@ -200,12 +207,20 @@ func (c *Config) validate(requireImage bool) error {
 	profileLabels := 0
 	for _, label := range c.Labels {
 		label = strings.TrimSpace(label)
-		if label == "" { return fmt.Errorf("RUNNER_LABELS cannot contain an empty label") }
+		if label == "" {
+			return fmt.Errorf("RUNNER_LABELS cannot contain an empty label")
+		}
 		if isOperatingSystemLabel(label) {
-			if !strings.EqualFold(label, c.OperatingSystemLabel()) { return fmt.Errorf("runner OS label %q conflicts with osType %s", label, c.OperatingSystemLabel()) }
-		} else { profileLabels++ }
+			if !strings.EqualFold(label, c.OperatingSystemLabel()) {
+				return fmt.Errorf("runner OS label %q conflicts with osType %s", label, c.OperatingSystemLabel())
+			}
+		} else {
+			profileLabels++
+		}
 	}
-	if profileLabels == 0 { return fmt.Errorf("RUNNER_LABELS requires a profile label in addition to the operating system") }
+	if profileLabels == 0 {
+		return fmt.Errorf("RUNNER_LABELS requires a profile label in addition to the operating system")
+	}
 	if err := c.GitHubApp.Validate(); err != nil {
 		return fmt.Errorf("GitHub App configuration is invalid: %w", err)
 	}
@@ -216,14 +231,14 @@ func (c *Config) validate(requireImage bool) error {
 		return fmt.Errorf("MAX_RUNNERS must be 0 (uncapped) or a positive int32")
 	}
 	for name, value := range map[string]string{
-		"AZURE_SUBSCRIPTION_ID":       c.SubscriptionID,
-		"AZURE_RESOURCE_GROUP":        c.ResourceGroup,
-		"AZURE_LOCATION":              c.Location,
-		"RUNNER_SUBNET_ID":            c.SubnetID,
-		"RUNNER_VM_SIZE":              c.VMSize,
-		"RUNNER_ADMIN_USERNAME":       c.VMAdminUser,
-		"RUNNER_VERSION":              c.RunnerVersion,
-		"RUNNER_SHA256":               c.RunnerSHA256,
+		"AZURE_SUBSCRIPTION_ID": c.SubscriptionID,
+		"AZURE_RESOURCE_GROUP":  c.ResourceGroup,
+		"AZURE_LOCATION":        c.Location,
+		"RUNNER_SUBNET_ID":      c.SubnetID,
+		"RUNNER_VM_SIZE":        c.VMSize,
+		"RUNNER_ADMIN_USERNAME": c.VMAdminUser,
+		"RUNNER_VERSION":        c.RunnerVersion,
+		"RUNNER_SHA256":         c.RunnerSHA256,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
@@ -235,8 +250,8 @@ func (c *Config) validate(requireImage bool) error {
 	if _, err := c.EffectiveOSDiskSizeGB(); err != nil {
 		return err
 	}
-	if c.ProvisionConcurrency < 1 {
-		return fmt.Errorf("PROVISION_CONCURRENCY must be positive")
+	if c.ProvisionConcurrency < 1 || c.ProvisionConcurrency > maxProvisionConcurrency {
+		return fmt.Errorf("PROVISION_CONCURRENCY must be between 1 and %d", maxProvisionConcurrency)
 	}
 	if c.ReconcileInterval < 15*time.Second {
 		return fmt.Errorf("RECONCILE_INTERVAL must be at least 15s")
@@ -286,7 +301,9 @@ func (c Config) PoolConfigs() ([]Config, error) {
 			// Never inherit the shared Linux image or Linux runner archive checksum.
 			p.ImageID = ""
 			p.RunnerSHA256 = c.WindowsRunnerSHA256
-			if p.RunnerSHA256 == "" { p.RunnerSHA256 = defaultWindowsRunnerSHA256 }
+			if p.RunnerSHA256 == "" {
+				p.RunnerSHA256 = defaultWindowsRunnerSHA256
+			}
 		}
 		if imageID := strings.TrimSpace(pool.ImageID); imageID != "" {
 			p.ImageID = imageID
@@ -300,7 +317,9 @@ func (c Config) PoolConfigs() ([]Config, error) {
 		}
 		for _, label := range p.Labels {
 			key := strings.ToLower(strings.TrimSpace(label))
-			if isOperatingSystemLabel(key) { continue }
+			if isOperatingSystemLabel(key) {
+				continue
+			}
 			if owner, ok := labels[key]; ok {
 				return nil, fmt.Errorf("runner label %q is repeated in pools %q and %q", label, owner, name)
 			}
@@ -326,7 +345,9 @@ func (c Config) ListenerMaxRunners() int {
 }
 
 func (c Config) OperatingSystemLabel() string {
-	if c.OSType == "Windows" { return "Windows" }
+	if c.OSType == "Windows" {
+		return "Windows"
+	}
 	return "Linux"
 }
 
@@ -338,7 +359,9 @@ func (c Config) ScaleSetLabels() []scaleset.Label {
 	labels := make([]scaleset.Label, 0, len(c.Labels)+1)
 	for _, label := range c.Labels {
 		label = strings.TrimSpace(label)
-		if !isOperatingSystemLabel(label) { labels = append(labels, scaleset.Label{Name: label}) }
+		if !isOperatingSystemLabel(label) {
+			labels = append(labels, scaleset.Label{Name: label})
+		}
 	}
 	// Advertise OS at the scale-set level so queued jobs can match while the
 	// pool has zero VMs. Runtime runner default labels arrive too late for that.
