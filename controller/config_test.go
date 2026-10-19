@@ -259,3 +259,15 @@ func TestOSDiskTierMappingAndDefaultPreservation(t *testing.T) {
 		})
 	}
 }
+
+func TestProvisionConcurrencyIsBoundedIndependentlyOfFleetSize(t *testing.T) {
+ for _, concurrency := range []int{0, -1, maxProvisionConcurrency + 1, 1000000} {
+  config := validConfig()
+  config.ProvisionConcurrency = concurrency
+  if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "PROVISION_CONCURRENCY") { t.Fatalf("concurrency %d accepted: %v", concurrency, err) }
+ }
+ config := validConfig()
+ config.ProvisionConcurrency = maxProvisionConcurrency
+ config.MaxRunners = 1000
+ if err := config.Validate(); err != nil { t.Fatal(err) }
+}

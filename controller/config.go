@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	defaultARMEndpoint = "https://management.azure.com"
-	defaultRunnerUser  = "actions-runner"
+	defaultARMEndpoint      = "https://management.azure.com"
+	defaultRunnerUser       = "actions-runner"
+	maxProvisionConcurrency = 32
 )
 
 type Config struct {
@@ -79,9 +80,11 @@ func (p *RunnerPool) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name":true, "vmSize":true, "maxRunners":true, "priority":true, "labels":true, "osDiskTier":true, "enabled":true, "imageId":true}
+	allowed := map[string]bool{"name": true, "vmSize": true, "maxRunners": true, "priority": true, "labels": true, "osDiskTier": true, "enabled": true, "imageId": true}
 	for key := range fields {
-		if !allowed[key] { return fmt.Errorf("unknown runner pool field %q", key) }
+		if !allowed[key] {
+			return fmt.Errorf("unknown runner pool field %q", key)
+		}
 	}
 	for _, key := range []string{"maxRunners", "enabled", "imageId"} {
 		if value, present := fields[key]; present && strings.TrimSpace(string(value)) == "null" {
@@ -212,8 +215,8 @@ func (c *Config) Validate() error {
 	if _, err := c.EffectiveOSDiskSizeGB(); err != nil {
 		return err
 	}
-	if c.ProvisionConcurrency < 1 {
-		return fmt.Errorf("PROVISION_CONCURRENCY must be positive")
+	if c.ProvisionConcurrency < 1 || c.ProvisionConcurrency > maxProvisionConcurrency {
+		return fmt.Errorf("PROVISION_CONCURRENCY must be between 1 and %d", maxProvisionConcurrency)
 	}
 	if c.ReconcileInterval < 15*time.Second {
 		return fmt.Errorf("RECONCILE_INTERVAL must be at least 15s")
