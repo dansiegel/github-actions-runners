@@ -24,6 +24,16 @@ usage() {
   echo "usage: $0 --subscription-id id --github-organization org [--dry-run|--apply] [--bootstrap-only] [--runner-pools-file json] [--runner-scale-set-name name] [--runner-max-capacity count] [--runner-vm-size sku] [--runner-vm-priority Regular|Spot] [--runner-labels csv] [--environment name] [--location region] [--resource-group name] [--ssh-public-key-file path] [--runner-image-id resource-id] [--runner-image-name-prefix prefix] [--confirm-subscription id]"
 }
 
+read_runner_ssh_key() {
+  local has_linux="$1" key_path="$2"
+  if [[ "$has_linux" != "true" ]]; then return 0; fi
+  if [[ ! -f "$key_path" ]]; then
+    echo "SSH public key not found: $key_path" >&2
+    return 2
+  fi
+  printf '%s' "$(<"$key_path")"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) MODE="dry-run"; shift ;;
@@ -142,6 +152,7 @@ RUNNER_POOLS_JSON="$(jq -ce '
 # transport; Bicep decodes it back to JSON inside the deployment.
 RUNNER_POOLS_BASE64="$(printf '%s' "$RUNNER_POOLS_JSON" | base64 | tr -d '\r\n')"
 
+HAS_ENABLED_LINUX="$(jq -r 'any(.[]; .enabled != false and (.osType // "Linux") == "Linux")' <<<"$RUNNER_POOLS_JSON")"
 NEEDS_SHARED_LINUX_IMAGE="$(jq -r 'any(.[]; .enabled != false and (.osType // "Linux") == "Linux" and (.imageId // "") == "")' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_NAME="$(jq -r '.[0].name' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_MAX="$(jq -r '.[0].maxRunners // 0' <<<"$RUNNER_POOLS_JSON")"
@@ -156,6 +167,7 @@ echo "Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)"
 echo "Runner pools:"
 jq -r '.[] | "  \(.name): \(if .enabled == false then "disabled" elif (.maxRunners // 0) == 0 then "0..demand (uncapped)" else "0..\(.maxRunners)" end) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
 jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then (if .osType == "Windows" then "unqualified Windows image (disabled)" else "shared RUNNER_IMAGE_ID" end) else "pool imageId override" end); OS tag: \(.osType // "Linux")"' <<<"$RUNNER_POOLS_JSON"
+echo "Linux SSH key required: $HAS_ENABLED_LINUX"
 echo "Shared Linux image required: $NEEDS_SHARED_LINUX_IMAGE"
 echo "Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 echo "Windows profiles:    explicit qualified imageId required; image build is separate"
@@ -169,10 +181,7 @@ if [[ "$CONFIRM_SUBSCRIPTION" != "$SUBSCRIPTION_ID" ]]; then
   echo "Refusing Azure mutation: --confirm-subscription must exactly equal $SUBSCRIPTION_ID" >&2
   exit 2
 fi
-if [[ ! -f "$SSH_PUBLIC_KEY_FILE" ]]; then
-  echo "SSH public key not found: $SSH_PUBLIC_KEY_FILE" >&2
-  exit 2
-fi
+ADMIN_SSH_PUBLIC_KEY_DATA="$(read_runner_ssh_key "$HAS_ENABLED_LINUX" "$SSH_PUBLIC_KEY_FILE")"
 required_commands=(az azd git)
 if [[ "$NEEDS_SHARED_LINUX_IMAGE" == "true" && -z "$EXISTING_RUNNER_IMAGE_ID" ]]; then required_commands+=(packer); fi
 for command in "${required_commands[@]}"; do
@@ -190,7 +199,7 @@ fi
 azd env set AZURE_SUBSCRIPTION_ID "$SUBSCRIPTION_ID"
 azd env set AZURE_LOCATION "$LOCATION"
 azd env set AZURE_RESOURCE_GROUP "$RESOURCE_GROUP"
-azd env set ADMIN_SSH_PUBLIC_KEY "$(<"$SSH_PUBLIC_KEY_FILE")"
+azd env set ADMIN_SSH_PUBLIC_KEY "$ADMIN_SSH_PUBLIC_KEY_DATA"
 azd env set GITHUB_ORGANIZATION "$GITHUB_ORGANIZATION"
 azd env set RUNNER_GROUP "$RUNNER_GROUP"
 azd env set RUNNER_SCALE_SET_NAME "$PRIMARY_POOL_NAME"
