@@ -491,3 +491,14 @@ func TestCompletionCorrectionUsesUncappedAssignmentCount(t *testing.T) {
  if target := state.updateDesired(10, 2); target != 2 { t.Fatalf("pending jobs lost capped capacity: %d", target) }
  if target := state.updateDesired(9, 2); target != 2 { t.Fatal(target) }
 }
+
+func TestFreshStatisticsWithEqualCountReleaseCompletionCorrection(t *testing.T) {
+ state := newRunnerState()
+ metrics := scalerMetrics{state:state}
+ metrics.RecordStatistics(&scaleset.RunnerScaleSetStatistic{TotalAssignedJobs:2})
+ state.updateDesired(2, 0)
+ state.markCompleted("finished")
+ if got := state.updateDesired(2, 0); got != 1 { t.Fatalf("stale snapshot: %d", got) }
+ metrics.RecordStatistics(&scaleset.RunnerScaleSetStatistic{TotalAssignedJobs:2})
+ if got := state.updateDesired(2, 0); got != 2 { t.Fatalf("fresh equal-count demand starved: %d", got) }
+}
