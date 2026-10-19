@@ -7,6 +7,7 @@ Controller unit tests cover:
 - configuration rejects any nonzero minimum and invalid caps, while zero or omitted caps follow demand;
 - pool JSON preserves independent CPU/disk settings, optional image overrides, optional caps, and disabled profiles;
 - the eight Linux and six Windows profile labels map to the expected SKUs and tiers, with all Windows profiles and Linux small profiles disabled, Windows S/SP excluded and `avp-linux-l` aliasing the existing `avp-linux` identity;
+- Windows configuration rejects unsupported SKUs and disk tiers, including disabled placeholders; reserved `avp-windows-*` names and labels must match their published OS, SKU, and P10/P20 disk combination before provisioning;
 - omitted or empty Linux image overrides inherit the shared image; Windows never inherits it; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
 - demand above 20 is supported, and positive optional caps are respected;
 - a desired count of zero removes all known-idle VMs;

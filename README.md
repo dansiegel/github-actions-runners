@@ -32,10 +32,10 @@ The controller uses GitHub's standalone [`actions/scaleset`](https://github.com/
 ## Prerequisites
 
 - Azure CLI, Bicep CLI, and Azure Developer CLI (`azd`)
-- Packer 1.15.4 or newer
+- Packer 1.15.4 or newer when building an image; fully image-pinned catalogs do not require Packer
 - `jq` for the Bash deployment script
 - permissions to create resources, custom roles, and role assignments in the target subscription/resource group
-- an SSH public key
+- an SSH public key when any enabled pool is Linux; Windows-only catalogs neither require nor read a Linux SSH key
 - a GitHub App installed on the target organization with **Organization self-hosted runners: Read and write**
 
 Capture the GitHub App client ID (or numeric App ID), installation ID, and a private key PEM.
@@ -109,7 +109,7 @@ az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-installation
 az keyvault secret set --vault-name "$VAULT_NAME" --name github-app-private-key --file '/secure/path/app.private-key.pem'
 ```
 
-Then run the apply command without `--bootstrap-only` / `-BootstrapOnly`. It builds one managed runner image, builds the controller in ACR, and deploys one shared controller for all enabled pools. To reuse an already validated image, pass its resource ID with `-RunnerImageId` or `--runner-image-id`.
+Then run the apply command without `--bootstrap-only` / `-BootstrapOnly`. It builds a shared Linux image only when an enabled Linux pool needs one, builds the controller in ACR, and deploys one shared controller for all enabled pools. Windows image creation remains a separate approved operator step. To reuse an already validated image, pass its resource ID with `-RunnerImageId` or `--runner-image-id`.
 
 Before migrating workflows, grant the runner group access only to intended trusted private/internal repositories. A workflow selects exactly one complete CPU/memory/disk profile by label:
 
