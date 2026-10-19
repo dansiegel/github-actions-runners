@@ -105,10 +105,12 @@ func (m *AzureVMManager) waitWindowsDeployment(ctx context.Context, vmName strin
 				if known && submitted == false {
 					return nil
 				}
-				if !known {
-					if err := m.checkWindowsDeploymentMarkers(ctx, vmName); err != nil {
-						return err
-					}
+				found, markerErr := m.checkWindowsDeploymentMarkers(ctx, vmName, known && submitted == true)
+				if markerErr != nil {
+					return markerErr
+				}
+				if !known || found {
+					m.windowsDeployments.Store(vmName, false)
 					return nil
 				}
 			}
@@ -223,28 +225,31 @@ func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmNa
 	return nil
 }
 
-func (m *AzureVMManager) checkWindowsDeploymentMarkers(ctx context.Context, vmName string) error {
+func (m *AzureVMManager) checkWindowsDeploymentMarkers(ctx context.Context, vmName string, requireTerminal bool) (bool, error) {
+	found := false
 	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
 		raw, err := m.get(ctx, id, networkAPIVersion)
 		if errors.Is(err, errResourceNotFound) {
 			continue
 		}
 		if err != nil {
-			return err
+			return found, err
 		}
+		found = true
 		var resource struct {
 			Tags map[string]string `json:"tags"`
 		}
 		if err := json.Unmarshal(raw, &resource); err != nil {
-			return err
+			return found, err
 		}
-		switch resource.Tags[windowsDeploymentStateTag] {
-		case "not-submitted", "terminal":
-		default:
-			return fmt.Errorf("%w: adopted Windows network resources have an uncertain deployment marker", errResourceNotFound)
+		marker := resource.Tags[windowsDeploymentStateTag]
+		if marker == "terminal" || (marker == "not-submitted" && !requireTerminal) {
+			continue
 		}
+		m.windowsDeployments.LoadOrStore(vmName, true)
+		return found, fmt.Errorf("%w: adopted Windows network resources have an uncertain deployment marker", errResourceNotFound)
 	}
-	return nil
+	return found, nil
 }
 
 // Retain nested quota/allocation codes for the shared backoff policy without

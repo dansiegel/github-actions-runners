@@ -329,6 +329,15 @@ func (m *AzureVMManager) List(ctx context.Context) ([]RunnerVM, error) {
 				continue
 			}
 			vmName := azureResourceName(runnerName)
+			if m.config.OSType == "Windows" {
+				marker := resource.Tags[windowsDeploymentStateTag]
+				if marker != "terminal" && marker != "not-submitted" {
+					// Reconstruct positive uncertainty from the adoption snapshot.
+					// A later lagging GET must not erase it, nor may a stale list
+					// override this process's known terminal/rejected outcome.
+					m.windowsDeployments.LoadOrStore(vmName, true)
+				}
+			}
 			if seen[vmName] {
 				continue
 			}
