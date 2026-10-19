@@ -349,6 +349,7 @@ func TestAcceptedWindowsPutWithForbiddenOperationReadStaysUncertain(t *testing.T
 	defer server.Close()
 	c := validConfig()
 	c.OSType = "Windows"
+	c.PublicIP = false
 	c.ImageID = "/images/windows"
 	c.ARMEndpoint = server.URL
 	manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
@@ -593,5 +594,42 @@ func TestAdoptedPendingSnapshotSurvivesLaterResource404(t *testing.T) {
 	}
 	if deletes != 0 {
 		t.Fatal("adopted uncertainty caused resource deletion")
+	}
+}
+
+func TestAdoptedWindowsVMSnapshotSurvivesMissingNetworkReads(t *testing.T) {
+	deletes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			deletes++
+		}
+		if strings.HasSuffix(r.URL.Path, "/virtualMachines") {
+			io.WriteString(w, `{"value":[{"name":"adopted","tags":{"managed-by":"gha-runner-scale-controller","runner-scale-set":"linux-4vcpu","github-runner-name":"adopted"}}]}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/instanceView") {
+			io.WriteString(w, `{"statuses":[{"code":"PowerState/deallocated"}]}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/networkInterfaces") || strings.HasSuffix(r.URL.Path, "/publicIPAddresses") {
+			io.WriteString(w, `{"value":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	c := validConfig()
+	c.OSType = "Windows"
+	c.ARMEndpoint = server.URL
+	manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+	runners, err := manager.List(context.Background())
+	if err != nil || len(runners) != 1 {
+		t.Fatalf("adoption: %v %v", runners, err)
+	}
+	if err := manager.Delete(context.Background(), "adopted"); !errors.Is(err, errResourceNotFound) {
+		t.Fatalf("network misses erased adopted VM evidence: %v", err)
+	}
+	if deletes != 0 {
+		t.Fatal("adopted VM deleted before deployment finality")
 	}
 }

@@ -205,6 +205,10 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		vmProperties["billingProfile"] = map[string]any{"maxPrice": -1}
 	}
 
+	// Deployment state is authoritative on the network resources only.
+	if m.config.OSType == "Windows" {
+		delete(tags, windowsDeploymentStateTag)
+	}
 	vmBody := map[string]any{"location": m.config.Location, "tags": tags, "properties": vmProperties}
 	if err := m.createRunnerVM(ctx, vmName, vmBody); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
@@ -314,6 +318,9 @@ func (m *AzureVMManager) List(ctx context.Context) ([]RunnerVM, error) {
 			m.logger.Warn("Unable to read runner power state", "vm", vm.Name, "error", err)
 		}
 		seen[vm.Name] = true
+		if m.config.OSType == "Windows" {
+			m.windowsDeployments.LoadOrStore(vm.Name, true)
+		}
 		result = append(result, RunnerVM{RunnerName: vm.Tags["github-runner-name"], VMName: vm.Name, CreatedAt: createdAt, PowerState: powerState})
 	}
 	// A failed create can leave only a NIC or public IP. Their existing

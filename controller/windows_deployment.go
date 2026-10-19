@@ -176,7 +176,7 @@ func (m *AzureVMManager) finishWindowsDeployment(ctx context.Context, vmName str
 // extra resource and contain no credential or JIT data. Both resources retain a
 // terminal marker so a crash between individual deletes remains recoverable.
 func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmName, state string) error {
-	nicFound := false
+	nicFound, ipFound := false, false
 	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
 		raw, err := m.get(ctx, id, networkAPIVersion)
 		if errors.Is(err, errResourceNotFound) {
@@ -218,9 +218,12 @@ func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmNa
 		if id == m.nicID(vmName) {
 			nicFound = true
 		}
+		if id == m.publicIPID(vmName) {
+			ipFound = true
+		}
 	}
-	if state == "pending" && !nicFound {
-		return fmt.Errorf("Windows deployment requires its durable NIC marker before submission")
+	if state == "pending" && (!nicFound || (m.config.PublicIP && !ipFound)) {
+		return fmt.Errorf("Windows deployment requires durable markers on every configured network resource before submission")
 	}
 	return nil
 }
