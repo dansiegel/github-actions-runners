@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -286,5 +287,71 @@ func TestUncertainWindowsDeployment404CannotReleaseResources(t *testing.T) {
 	}
 	if deletes != 4 {
 		t.Fatalf("retry did not clean resources: %d", deletes)
+	}
+}
+
+func TestRejectedWindowsDeploymentReleasesNetworkResources(t *testing.T) {
+	for _, status := range []int{400, 401, 403, 404, 405, 422} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			deploymentPuts, resourceDeletes := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/deployments/") {
+					if r.Method == http.MethodPut {
+						deploymentPuts++
+						w.WriteHeader(status)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.Method == http.MethodDelete {
+					resourceDeletes++
+				}
+				io.WriteString(w, `{}`)
+			}))
+			defer server.Close()
+			c := validConfig()
+			c.OSType = "Windows"
+			c.ImageID = "/images/windows"
+			c.ARMEndpoint = server.URL
+			manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+			if _, err := manager.Create(context.Background(), "rejected", "jit"); err == nil {
+				t.Fatal("rejected deployment succeeded")
+			}
+			if _, submitted := manager.windowsDeployments.Load("rejected"); submitted {
+				t.Fatal("rejected PUT retained uncertain marker")
+			}
+			if deploymentPuts != 1 || resourceDeletes != 3 {
+				t.Fatalf("PUTs=%d resource deletions=%d", deploymentPuts, resourceDeletes)
+			}
+		})
+	}
+}
+
+func TestAcceptedWindowsPutWithForbiddenOperationReadStaysUncertain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.Header().Set("Azure-AsyncOperation", "http://"+r.Host+"/accepted-operation")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if r.URL.Path == "/accepted-operation" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	c := validConfig()
+	c.OSType = "Windows"
+	c.ImageID = "/images/windows"
+	c.ARMEndpoint = server.URL
+	manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+	body := map[string]any{"properties": map[string]any{"osProfile": map[string]any{"customData": "fixture"}}}
+	if err := manager.createRunnerVM(context.Background(), "accepted", body); err == nil {
+		t.Fatal("uncertain operation succeeded")
+	}
+	if _, submitted := manager.windowsDeployments.Load("accepted"); !submitted {
+		t.Fatal("GET denial after accepted PUT cleared uncertainty")
 	}
 }

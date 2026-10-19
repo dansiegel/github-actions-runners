@@ -28,6 +28,18 @@ const (
 
 var errResourceNotFound = errors.New("Azure resource not found")
 
+// Preserve response origin so callers can distinguish a rejected mutation from
+// a failure while polling an already accepted operation.
+type armHTTPError struct {
+	method     string
+	statusCode int
+	message    string
+	cause      error
+}
+
+func (e *armHTTPError) Error() string { return e.message }
+func (e *armHTTPError) Unwrap() error { return e.cause }
+
 type RunnerVM struct {
 	RunnerName string
 	RunnerID   int
@@ -436,7 +448,7 @@ func (m *AzureVMManager) requestWithRetry(ctx context.Context, method, requestUR
 			return nil, readErr
 		}
 		if resp.StatusCode == http.StatusNotFound {
-			return nil, errResourceNotFound
+			return nil, &armHTTPError{method: method, statusCode: resp.StatusCode, message: errResourceNotFound.Error(), cause: errResourceNotFound}
 		}
 		operationURL := resp.Header.Get("Azure-AsyncOperation")
 		if operationURL == "" {
@@ -459,7 +471,7 @@ func (m *AzureVMManager) requestWithRetry(ctx context.Context, method, requestUR
 			continue
 		}
 		if !containsStatus(accepted, resp.StatusCode) {
-			return nil, fmt.Errorf("Azure ARM %s %s returned %d: %s", method, requestURL, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+			return nil, &armHTTPError{method: method, statusCode: resp.StatusCode, message: fmt.Sprintf("Azure ARM %s %s returned %d: %s", method, requestURL, resp.StatusCode, strings.TrimSpace(string(responseBody)))}
 		}
 		return responseBody, nil
 	}
