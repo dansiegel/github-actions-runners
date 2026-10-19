@@ -48,7 +48,7 @@ func TestWindowsUnsupportedProfilesFailConfiguration(t *testing.T) {
 			// Disabled placeholders must fail too; keep a valid Linux pool enabled.
 			disabled := false
 			c = validConfig()
-			c.Pools = []RunnerPool{{Name: "linux", VMSize: "Standard_D4s_v5"}, {Name: tc.label, VMSize: tc.sku, OSDiskTier: tc.tier, OSType: tc.os, Enabled: &disabled}}
+			c.Pools = []RunnerPool{{Name: "linux-profile", VMSize: "Standard_D4s_v5"}, {Name: tc.label, VMSize: tc.sku, OSDiskTier: tc.tier, OSType: tc.os, Enabled: &disabled}}
 			c.OSDiskSizeGB = tc.size
 			if err := c.Validate(); err == nil {
 				t.Fatal("unsupported disabled Windows placeholder accepted")

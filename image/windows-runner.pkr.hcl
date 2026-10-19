@@ -14,6 +14,10 @@ variable "managed_image_name" { type = string }
 variable "location" {
   type    = string
   default = "eastus2"
+  validation {
+    condition     = var.location == "eastus2"
+    error_message = "Windows image qualification and finalization currently support only eastus2."
+  }
 }
 variable "build_source_cidr" {
   type = string

@@ -457,3 +457,48 @@ func TestConfirmedMissingRunnerRetainsCleanupUntilItSucceeds(t *testing.T) {
 	scaler.HandleDesiredRunnerCount(context.Background(),0)
 	waitFor(t,func()bool{return scaler.state.resourceCount()==0})
 }
+
+func TestCompletionCorrectionSurvivesStaleStatisticsAndDeletion(t *testing.T) {
+ for _, cap := range []int{0, 2} {
+  t.Run(fmt.Sprint(cap), func(t *testing.T) {
+   scaler, provider := testScaler(t, cap)
+   scaler.HandleDesiredRunnerCount(context.Background(), 2)
+   waitForIdle(t, scaler, 2)
+   scaler.state.mu.Lock()
+   names := make([]string, 0, 2)
+   for name := range scaler.state.runners { names = append(names, name) }
+   scaler.state.mu.Unlock()
+   for i, name := range names {
+    scaler.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName:name})
+    scaler.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName:name})
+    for range 3 { scaler.HandleDesiredRunnerCount(context.Background(), 2) }
+    waitFor(t, func() bool { _, deleted := provider.counts(); return deleted == i+1 })
+   }
+   scaler.HandleDesiredRunnerCount(context.Background(), 2)
+   if scaler.state.reserve("unnecessary-replacement", cap) { t.Fatal("stale completion statistics reserved a replacement") }
+   if created, _ := provider.counts(); created != 2 { t.Fatalf("created %d runners", created) }
+   scaler.HandleDesiredRunnerCount(context.Background(), 0)
+   scaler.HandleDesiredRunnerCount(context.Background(), 2)
+   waitForIdle(t, scaler, 2)
+  })
+ }
+}
+
+func TestCompletionCorrectionUsesUncappedAssignmentCount(t *testing.T) {
+ state := newRunnerState()
+ if target := state.updateDesired(10, 2); target != 2 { t.Fatal(target) }
+ state.markCompleted("finished")
+ if target := state.updateDesired(10, 2); target != 2 { t.Fatalf("pending jobs lost capped capacity: %d", target) }
+ if target := state.updateDesired(9, 2); target != 2 { t.Fatal(target) }
+}
+
+func TestFreshStatisticsWithEqualCountReleaseCompletionCorrection(t *testing.T) {
+ state := newRunnerState()
+ metrics := scalerMetrics{state:state}
+ metrics.RecordStatistics(&scaleset.RunnerScaleSetStatistic{TotalAssignedJobs:2})
+ state.updateDesired(2, 0)
+ state.markCompleted("finished")
+ if got := state.updateDesired(2, 0); got != 1 { t.Fatalf("stale snapshot: %d", got) }
+ metrics.RecordStatistics(&scaleset.RunnerScaleSetStatistic{TotalAssignedJobs:2})
+ if got := state.updateDesired(2, 0); got != 2 { t.Fatalf("fresh equal-count demand starved: %d", got) }
+}

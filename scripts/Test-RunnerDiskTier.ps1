@@ -87,10 +87,14 @@ try {
     Test-PoolDryRun -Name 'shared automatic OS tags' -Pools @(@{ name = 'linux-one'; vmSize = 'Standard_D4s_v5'; labels = @('linux-one', 'Linux') }, @{ name = 'linux-two'; vmSize = 'Standard_D2s_v5'; labels = @('linux-two', 'linux') }) -Expected @('OS tag: Linux')
     Test-PoolDryRun -Name 'Windows OS tag' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows'; labels = @('win', 'WINDOWS') }) -Expected @('OS tag: Windows')
     foreach ($labels in @(@('Windows', 'profile'), @('macOS', 'profile'), @('Linux'))) {
-        Test-PoolDryRun -Name 'invalid Linux OS tag or missing profile' -Pools @(@{ name = 'linux'; vmSize = 'Standard_D4s_v5'; labels = $labels }) -Valid $false
+        Test-PoolDryRun -Name 'invalid Linux OS tag or missing profile' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; labels = $labels }) -Valid $false
     }
     Test-PoolDryRun -Name 'all profiles disabled' -Pools @(@{ name = 'test-pool'; vmSize = 'Standard_D4s_v5'; enabled = $false }) -Valid $false
     Test-PoolDryRun -Name 'duplicate labels' -Pools @(@{ name = 'pool-one'; vmSize = 'Standard_D4s_v5'; labels = @('shared') }, @{ name = 'pool-two'; vmSize = 'Standard_D4s_v5'; labels = @('SHARED'); enabled = $false }) -Valid $false
+    Test-PoolDryRun -Name 'Windows-only skips shared Linux image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: false')
+    Test-PoolDryRun -Name 'disabled Linux skips shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; enabled = $false }, @{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: false')
+    Test-PoolDryRun -Name 'pinned Linux skips shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; imageId = '/images/linux' }) -Expected @('Shared Linux image required: false')
+    Test-PoolDryRun -Name 'mixed inheriting Linux needs shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5' }, @{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: true')
     $manyPools = @(1..9 | ForEach-Object { @{ name = "test-pool-$_"; vmSize = 'Standard_D4s_v5' } })
     Test-PoolDryRun -Name 'more than eight pools' -Pools $manyPools -Expected @('test-pool-9: 0\.\.demand')
     Test-PoolDryRun -Name 'empty array' -Pools @() -Valid $false

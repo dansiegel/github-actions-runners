@@ -142,6 +142,7 @@ RUNNER_POOLS_JSON="$(jq -ce '
 # transport; Bicep decodes it back to JSON inside the deployment.
 RUNNER_POOLS_BASE64="$(printf '%s' "$RUNNER_POOLS_JSON" | base64 | tr -d '\r\n')"
 
+NEEDS_SHARED_LINUX_IMAGE="$(jq -r 'any(.[]; .enabled != false and (.osType // "Linux") == "Linux" and (.imageId // "") == "")' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_NAME="$(jq -r '.[0].name' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_MAX="$(jq -r '.[0].maxRunners // 0' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_VM_SIZE="$(jq -r '.[0].vmSize' <<<"$RUNNER_POOLS_JSON")"
@@ -155,6 +156,7 @@ echo "Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)"
 echo "Runner pools:"
 jq -r '.[] | "  \(.name): \(if .enabled == false then "disabled" elif (.maxRunners // 0) == 0 then "0..demand (uncapped)" else "0..\(.maxRunners)" end) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
 jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then (if .osType == "Windows" then "unqualified Windows image (disabled)" else "shared RUNNER_IMAGE_ID" end) else "pool imageId override" end); OS tag: \(.osType // "Linux")"' <<<"$RUNNER_POOLS_JSON"
+echo "Shared Linux image required: $NEEDS_SHARED_LINUX_IMAGE"
 echo "Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 echo "Windows profiles:    explicit qualified imageId required; image build is separate"
 
@@ -171,7 +173,9 @@ if [[ ! -f "$SSH_PUBLIC_KEY_FILE" ]]; then
   echo "SSH public key not found: $SSH_PUBLIC_KEY_FILE" >&2
   exit 2
 fi
-for command in az azd packer git; do
+required_commands=(az azd git)
+if [[ "$NEEDS_SHARED_LINUX_IMAGE" == "true" && -z "$EXISTING_RUNNER_IMAGE_ID" ]]; then required_commands+=(packer); fi
+for command in "${required_commands[@]}"; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 
@@ -214,7 +218,7 @@ for secret_name in github-app-client-id github-app-private-key github-app-instal
   az keyvault secret show --vault-name "$VAULT_NAME" --name "$secret_name" --query id --output tsv >/dev/null
 done
 
-if [[ -z "$EXISTING_RUNNER_IMAGE_ID" ]]; then
+if [[ "$NEEDS_SHARED_LINUX_IMAGE" == "true" && -z "$EXISTING_RUNNER_IMAGE_ID" ]]; then
   IMAGE_NAME="$RUNNER_IMAGE_NAME_PREFIX-$(date -u +%Y%m%d%H%M%S)"
   packer init image/runner.pkr.hcl
   packer build \
@@ -224,7 +228,7 @@ if [[ -z "$EXISTING_RUNNER_IMAGE_ID" ]]; then
     -var "managed_image_name=$IMAGE_NAME" \
     image/runner.pkr.hcl
   EXISTING_RUNNER_IMAGE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Compute/images/$IMAGE_NAME"
-else
+elif [[ -n "$EXISTING_RUNNER_IMAGE_ID" ]]; then
   RESOLVED_IMAGE_ID="$(az resource show --ids "$EXISTING_RUNNER_IMAGE_ID" --query id --output tsv)"
   if [[ "${RESOLVED_IMAGE_ID,,}" != "${EXISTING_RUNNER_IMAGE_ID,,}" ]]; then
     echo "Resolved runner image did not match --runner-image-id" >&2
