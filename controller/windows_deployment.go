@@ -105,10 +105,12 @@ func (m *AzureVMManager) waitWindowsDeployment(ctx context.Context, vmName strin
 				if known && submitted == false {
 					return nil
 				}
-				if !known {
-					if err := m.checkWindowsDeploymentMarkers(ctx, vmName); err != nil {
-						return err
-					}
+				found, markerErr := m.checkWindowsDeploymentMarkers(ctx, vmName, known && submitted == true)
+				if markerErr != nil {
+					return markerErr
+				}
+				if !known || found {
+					m.windowsDeployments.Store(vmName, false)
 					return nil
 				}
 			}
@@ -174,7 +176,7 @@ func (m *AzureVMManager) finishWindowsDeployment(ctx context.Context, vmName str
 // extra resource and contain no credential or JIT data. Both resources retain a
 // terminal marker so a crash between individual deletes remains recoverable.
 func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmName, state string) error {
-	nicFound := false
+	nicFound, ipFound := false, false
 	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
 		raw, err := m.get(ctx, id, networkAPIVersion)
 		if errors.Is(err, errResourceNotFound) {
@@ -216,35 +218,41 @@ func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmNa
 		if id == m.nicID(vmName) {
 			nicFound = true
 		}
+		if id == m.publicIPID(vmName) {
+			ipFound = true
+		}
 	}
-	if state == "pending" && !nicFound {
-		return fmt.Errorf("Windows deployment requires its durable NIC marker before submission")
+	if state == "pending" && (!nicFound || (m.config.PublicIP && !ipFound)) {
+		return fmt.Errorf("Windows deployment requires durable markers on every configured network resource before submission")
 	}
 	return nil
 }
 
-func (m *AzureVMManager) checkWindowsDeploymentMarkers(ctx context.Context, vmName string) error {
+func (m *AzureVMManager) checkWindowsDeploymentMarkers(ctx context.Context, vmName string, requireTerminal bool) (bool, error) {
+	found := false
 	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
 		raw, err := m.get(ctx, id, networkAPIVersion)
 		if errors.Is(err, errResourceNotFound) {
 			continue
 		}
 		if err != nil {
-			return err
+			return found, err
 		}
+		found = true
 		var resource struct {
 			Tags map[string]string `json:"tags"`
 		}
 		if err := json.Unmarshal(raw, &resource); err != nil {
-			return err
+			return found, err
 		}
-		switch resource.Tags[windowsDeploymentStateTag] {
-		case "not-submitted", "terminal":
-		default:
-			return fmt.Errorf("%w: adopted Windows network resources have an uncertain deployment marker", errResourceNotFound)
+		marker := resource.Tags[windowsDeploymentStateTag]
+		if marker == "terminal" || (marker == "not-submitted" && !requireTerminal) {
+			continue
 		}
+		m.windowsDeployments.LoadOrStore(vmName, true)
+		return found, fmt.Errorf("%w: adopted Windows network resources have an uncertain deployment marker", errResourceNotFound)
 	}
-	return nil
+	return found, nil
 }
 
 // Retain nested quota/allocation codes for the shared backoff policy without
