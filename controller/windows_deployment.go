@@ -52,6 +52,17 @@ func (m *AzureVMManager) createRunnerVM(ctx context.Context, vmName string, vmBo
 	// a new runner/resource identity after cleanup.
 	m.windowsDeployments.Store(vmName, true)
 	_, putErr := m.requestWithRetry(ctx, http.MethodPut, m.resourceURL(m.deploymentID(vmName), deploymentAPIVersion), body, false, http.StatusOK, http.StatusCreated, http.StatusAccepted)
+	var responseErr *armHTTPError
+	if errors.As(putErr, &responseErr) && responseErr.method == http.MethodPut &&
+		responseErr.statusCode >= 400 && responseErr.statusCode < 500 &&
+		responseErr.statusCode != http.StatusRequestTimeout &&
+		responseErr.statusCode != http.StatusConflict &&
+		responseErr.statusCode != http.StatusTooManyRequests {
+		// The PUT itself was rejected. A GET/polling failure after acceptance,
+		// transport failure, timeout, conflict or server failure is uncertain.
+		m.windowsDeployments.Delete(vmName)
+		return putErr
+	}
 	if err := m.waitWindowsDeployment(ctx, vmName, false); err != nil {
 		return errors.Join(putErr, err)
 	}
