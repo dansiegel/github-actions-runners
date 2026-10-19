@@ -33,6 +33,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
+function Get-RunnerAdminSshPublicKey {
+    param([bool] $HasLinux, [string] $KeyFile)
+    if (-not $HasLinux) { return '' }
+    if (-not (Test-Path -LiteralPath $KeyFile -PathType Leaf)) { throw "SSH public key not found: $KeyFile" }
+    return (Get-Content -LiteralPath $KeyFile -Raw).Trim()
+}
+
 function Get-NormalizedRunnerPools {
     if ([string]::IsNullOrWhiteSpace($RunnerPoolsFile)) {
         $labels = @($RunnerLabels | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -156,6 +163,7 @@ $runnerPools = @(Get-NormalizedRunnerPools)
 $runnerPoolsJson = ConvertTo-Json -InputObject $runnerPools -Compress -Depth 5
 $runnerPoolsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($runnerPoolsJson))
 $primaryPool = $runnerPools[0]
+$hasEnabledLinux = @($runnerPools | Where-Object { $_.enabled -ne $false -and $_.osType -cne 'Windows' }).Count -gt 0
 $needsSharedLinuxImage = @($runnerPools | Where-Object { $_.enabled -ne $false -and $_.osType -cne 'Windows' -and [string]::IsNullOrWhiteSpace($_.imageId) }).Count -gt 0
 
 Write-Host "Target subscription: $SubscriptionId"
@@ -171,6 +179,7 @@ foreach ($pool in $runnerPools) {
     $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
     Write-Host ("  {0} labels: {1}; image: {2}; OS tag: {3}" -f $pool.name, ($pool.labels -join ', '), $imageSource, $osLabel)
 }
+Write-Host ("Linux SSH key required: {0}" -f $hasEnabledLinux.ToString().ToLowerInvariant())
 Write-Host ("Shared Linux image required: {0}" -f $needsSharedLinuxImage.ToString().ToLowerInvariant())
 Write-Host 'Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 
@@ -184,9 +193,7 @@ if ($Mode -ne 'Apply') {
 if ($ConfirmSubscription -ne $SubscriptionId) {
     throw "Refusing Azure mutation: -ConfirmSubscription must exactly equal $SubscriptionId"
 }
-if (-not (Test-Path -LiteralPath $SshPublicKeyFile -PathType Leaf)) {
-    throw "SSH public key not found: $SshPublicKeyFile"
-}
+$adminSshPublicKey = Get-RunnerAdminSshPublicKey -HasLinux $hasEnabledLinux -KeyFile $SshPublicKeyFile
 $requiredCommands = @('az', 'azd', 'git')
 if ($needsSharedLinuxImage -and [string]::IsNullOrWhiteSpace($RunnerImageId)) { $requiredCommands += 'packer' }
 foreach ($command in $requiredCommands) {
@@ -209,7 +216,7 @@ catch {
 azd env set AZURE_SUBSCRIPTION_ID $SubscriptionId
 azd env set AZURE_LOCATION $Location
 azd env set AZURE_RESOURCE_GROUP $ResourceGroup
-azd env set ADMIN_SSH_PUBLIC_KEY (Get-Content -LiteralPath $SshPublicKeyFile -Raw).Trim()
+azd env set ADMIN_SSH_PUBLIC_KEY $adminSshPublicKey
 azd env set GITHUB_ORGANIZATION $GitHubOrganization
 azd env set RUNNER_GROUP $RunnerGroup
 azd env set RUNNER_SCALE_SET_NAME $primaryPool.name
