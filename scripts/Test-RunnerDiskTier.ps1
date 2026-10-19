@@ -167,7 +167,7 @@ try {
         $invalid.imageId = '/qualified/windows'
         Test-PoolDryRun -Name 'unsupported Windows combination' -Pools @($invalid) -Valid $false
         $invalid.enabled = $false
-        Test-PoolDryRun -Name 'unsupported disabled Windows combination' -Pools @(@{ name = 'linux'; vmSize = 'Standard_D4s_v5' }, $invalid) -Valid $false
+        Test-PoolDryRun -Name 'unsupported disabled Windows combination' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5' }, $invalid) -Valid $false
     }
     Test-PoolDryRun -Name 'Windows label cannot route to Linux' -Pools @(@{ name = 'linux'; vmSize = 'Standard_D4s_v5'; osDiskTier = 'P20'; labels = @('avp-windows-lp') }) -Valid $false
     Test-PoolDryRun -Name 'plaintext password rejected' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; adminPassword = 'not-accepted' }) -Valid $false
