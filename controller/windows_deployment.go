@@ -11,6 +11,7 @@ import (
 )
 
 const deploymentAPIVersion = "2025-04-01"
+const windowsDeploymentStateTag = "runner-windows-deployment"
 
 func (m *AzureVMManager) deploymentID(vmName string) string {
 	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Resources/deployments/%s", m.config.SubscriptionID, m.config.ResourceGroup, vmName)
@@ -50,6 +51,12 @@ func (m *AzureVMManager) createRunnerVM(ctx context.Context, vmName string, vmBo
 	// uncertain deployment: that would evaluate a fresh default credential.
 	// Poll the same deterministic deployment instead; later fleet retries use
 	// a new runner/resource identity after cleanup.
+	// Persist and read back the marker on the existing NIC/IP before the only
+	// PUT. A new process must remain conservative even during ARM visibility lag.
+	m.windowsDeployments.Store(vmName, false)
+	if err := m.persistWindowsDeploymentState(ctx, vmName, "pending"); err != nil {
+		return err
+	}
 	m.windowsDeployments.Store(vmName, true)
 	_, putErr := m.requestWithRetry(ctx, http.MethodPut, m.resourceURL(m.deploymentID(vmName), deploymentAPIVersion), body, false, http.StatusOK, http.StatusCreated, http.StatusAccepted)
 	var responseErr *armHTTPError
@@ -60,8 +67,8 @@ func (m *AzureVMManager) createRunnerVM(ctx context.Context, vmName string, vmBo
 		responseErr.statusCode != http.StatusTooManyRequests {
 		// The PUT itself was rejected. A GET/polling failure after acceptance,
 		// transport failure, timeout, conflict or server failure is uncertain.
-		m.windowsDeployments.Delete(vmName)
-		return putErr
+		m.windowsDeployments.Store(vmName, false)
+		return errors.Join(putErr, m.persistWindowsDeploymentState(ctx, vmName, "terminal"))
 	}
 	if err := m.waitWindowsDeployment(ctx, vmName, false); err != nil {
 		return errors.Join(putErr, err)
@@ -93,9 +100,17 @@ func (m *AzureVMManager) waitWindowsDeployment(ctx context.Context, vmName strin
 			// An uncertain PUT is not disproved by missing reads. Leave network
 			// resources intact and let cleanup retry until a terminal state is
 			// observed, rather than allowing a late deployment to recreate a VM.
-			_, submitted := m.windowsDeployments.Load(vmName)
-			if cleanup && !submitted {
-				return nil
+			if cleanup {
+				submitted, known := m.windowsDeployments.Load(vmName)
+				if known && submitted == false {
+					return nil
+				}
+				if !known {
+					if err := m.checkWindowsDeploymentMarkers(ctx, vmName); err != nil {
+						return err
+					}
+					return nil
+				}
 			}
 		}
 		if err != nil {
@@ -114,10 +129,16 @@ func (m *AzureVMManager) waitWindowsDeployment(ctx context.Context, vmName strin
 		state := strings.ToLower(deployment.Properties.ProvisioningState)
 		switch state {
 		case "succeeded":
-			m.windowsDeployments.Delete(vmName)
+			if err := m.persistWindowsDeploymentState(ctx, vmName, "terminal"); err != nil {
+				return err
+			}
+			m.windowsDeployments.Store(vmName, false)
 			return nil
 		case "failed", "canceled", "cancelled":
-			m.windowsDeployments.Delete(vmName)
+			if err := m.persistWindowsDeploymentState(ctx, vmName, "terminal"); err != nil {
+				return err
+			}
+			m.windowsDeployments.Store(vmName, false)
 			if cleanup {
 				return nil
 			}
@@ -145,6 +166,83 @@ func (m *AzureVMManager) finishWindowsDeployment(ctx context.Context, vmName str
 	}
 	if err := m.delete(ctx, m.deploymentID(vmName), deploymentAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
 		return err
+	}
+	return nil
+}
+
+// These tags use the existing network resource write permissions, create no
+// extra resource and contain no credential or JIT data. Both resources retain a
+// terminal marker so a crash between individual deletes remains recoverable.
+func (m *AzureVMManager) persistWindowsDeploymentState(ctx context.Context, vmName, state string) error {
+	nicFound := false
+	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
+		raw, err := m.get(ctx, id, networkAPIVersion)
+		if errors.Is(err, errResourceNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var resource struct {
+			Tags map[string]string `json:"tags"`
+		}
+		if err := json.Unmarshal(raw, &resource); err != nil {
+			return err
+		}
+		if resource.Tags == nil {
+			resource.Tags = map[string]string{}
+		}
+		resource.Tags[windowsDeploymentStateTag] = state
+		body, err := json.Marshal(map[string]any{"tags": resource.Tags})
+		if err != nil {
+			return err
+		}
+		if _, err := m.request(ctx, http.MethodPatch, m.resourceURL(id, networkAPIVersion), body, http.StatusOK); err != nil {
+			return err
+		}
+		raw, err = m.get(ctx, id, networkAPIVersion)
+		if err != nil {
+			return err
+		}
+		var observed struct {
+			Tags map[string]string `json:"tags"`
+		}
+		if err := json.Unmarshal(raw, &observed); err != nil {
+			return err
+		}
+		if observed.Tags[windowsDeploymentStateTag] != state {
+			return fmt.Errorf("Windows deployment marker was not persisted on existing network resource")
+		}
+		if id == m.nicID(vmName) {
+			nicFound = true
+		}
+	}
+	if state == "pending" && !nicFound {
+		return fmt.Errorf("Windows deployment requires its durable NIC marker before submission")
+	}
+	return nil
+}
+
+func (m *AzureVMManager) checkWindowsDeploymentMarkers(ctx context.Context, vmName string) error {
+	for _, id := range []string{m.nicID(vmName), m.publicIPID(vmName)} {
+		raw, err := m.get(ctx, id, networkAPIVersion)
+		if errors.Is(err, errResourceNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var resource struct {
+			Tags map[string]string `json:"tags"`
+		}
+		if err := json.Unmarshal(raw, &resource); err != nil {
+			return err
+		}
+		switch resource.Tags[windowsDeploymentStateTag] {
+		case "not-submitted", "terminal":
+		default:
+			return fmt.Errorf("%w: adopted Windows network resources have an uncertain deployment marker", errResourceNotFound)
+		}
 	}
 	return nil
 }

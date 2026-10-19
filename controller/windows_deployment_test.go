@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -20,7 +21,7 @@ func TestWindowsCreateGeneratesCredentialInsideAzureAndDeletesMetadata(t *testin
 	var mu sync.Mutex
 	var deployment map[string]any
 	deleted := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		mu.Lock()
 		defer mu.Unlock()
@@ -95,7 +96,7 @@ func TestWindowsCreateGeneratesCredentialInsideAzureAndDeletesMetadata(t *testin
 func TestWindowsDeleteCancelsDeploymentBeforeDeletingVM(t *testing.T) {
 	state := "Running"
 	var order []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/deployments/") {
 			if strings.HasSuffix(r.URL.Path, "/cancel") {
@@ -134,7 +135,7 @@ func TestWindowsDeleteCancelsDeploymentBeforeDeletingVM(t *testing.T) {
 
 func TestUnqualifiedWindowsCreatesNoResources(t *testing.T) {
 	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusCreated) }))
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(http.StatusCreated) }))
 	defer server.Close()
 	c := validConfig()
 	c.OSType = "Windows"
@@ -150,7 +151,7 @@ func TestUnqualifiedWindowsCreatesNoResources(t *testing.T) {
 
 func TestWindowsUncertainPutPollsWithoutRegeneratingCredential(t *testing.T) {
 	puts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/deployments/") {
 			if r.Method == http.MethodPut {
@@ -182,7 +183,7 @@ func TestWindowsUncertainPutPollsWithoutRegeneratingCredential(t *testing.T) {
 
 func TestMissingWindowsDeploymentAccessCreatesNoBillableResources(t *testing.T) {
 	mutations := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			mutations++
 		}
@@ -208,7 +209,7 @@ func TestWindowsCleanupWaitsForCancellableStateAndDelayedVisibility(t *testing.T
 		t.Run(initial, func(t *testing.T) {
 			reads, cancels, deletes := 0, 0, 0
 			state := initial
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "/deployments/") {
 					if strings.HasSuffix(r.URL.Path, "/cancel") {
 						if state != "Running" {
@@ -259,7 +260,7 @@ func TestWindowsCleanupWaitsForCancellableStateAndDelayedVisibility(t *testing.T
 func TestUncertainWindowsDeployment404CannotReleaseResources(t *testing.T) {
 	deletes := 0
 	visible := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			deletes++
 		}
@@ -294,7 +295,7 @@ func TestRejectedWindowsDeploymentReleasesNetworkResources(t *testing.T) {
 	for _, status := range []int{400, 401, 403, 404, 405, 422} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			deploymentPuts, resourceDeletes := 0, 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "/deployments/") {
 					if r.Method == http.MethodPut {
 						deploymentPuts++
@@ -318,7 +319,7 @@ func TestRejectedWindowsDeploymentReleasesNetworkResources(t *testing.T) {
 			if _, err := manager.Create(context.Background(), "rejected", "jit"); err == nil {
 				t.Fatal("rejected deployment succeeded")
 			}
-			if _, submitted := manager.windowsDeployments.Load("rejected"); submitted {
+			if submitted, _ := manager.windowsDeployments.Load("rejected"); submitted == true {
 				t.Fatal("rejected PUT retained uncertain marker")
 			}
 			if deploymentPuts != 1 || resourceDeletes != 3 {
@@ -329,14 +330,18 @@ func TestRejectedWindowsDeploymentReleasesNetworkResources(t *testing.T) {
 }
 
 func TestAcceptedWindowsPutWithForbiddenOperationReadStaysUncertain(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
+	server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/deployments/") {
 			w.Header().Set("Azure-AsyncOperation", "http://"+r.Host+"/accepted-operation")
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		if r.URL.Path == "/accepted-operation" {
 			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusCreated)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -347,11 +352,213 @@ func TestAcceptedWindowsPutWithForbiddenOperationReadStaysUncertain(t *testing.T
 	c.ImageID = "/images/windows"
 	c.ARMEndpoint = server.URL
 	manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+	if err := manager.put(context.Background(), manager.nicID("accepted"), networkAPIVersion, map[string]any{"tags": map[string]string{"existing": "preserved"}}); err != nil {
+		t.Fatal(err)
+	}
 	body := map[string]any{"properties": map[string]any{"osProfile": map[string]any{"customData": "fixture"}}}
 	if err := manager.createRunnerVM(context.Background(), "accepted", body); err == nil {
 		t.Fatal("uncertain operation succeeded")
 	}
 	if _, submitted := manager.windowsDeployments.Load("accepted"); !submitted {
 		t.Fatal("GET denial after accepted PUT cleared uncertainty")
+	}
+}
+
+func newWindowsTestServer(handler http.Handler) *httptest.Server {
+	var mu sync.Mutex
+	resources := map[string]map[string]string{}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		network := strings.Contains(r.URL.Path, "/networkInterfaces/") || strings.Contains(r.URL.Path, "/publicIPAddresses/")
+		if network {
+			mu.Lock()
+			if r.Method == http.MethodPut || r.Method == http.MethodPatch {
+				raw, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewReader(raw))
+				var body struct {
+					Tags map[string]string `json:"tags"`
+				}
+				json.Unmarshal(raw, &body)
+				resources[r.URL.Path] = body.Tags
+				if r.Method == http.MethodPatch {
+					mu.Unlock()
+					io.WriteString(w, `{}`)
+					return
+				}
+			}
+			if r.Method == http.MethodGet {
+				tags, ok := resources[r.URL.Path]
+				if !ok {
+					mu.Unlock()
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"tags": tags})
+				mu.Unlock()
+				return
+			}
+			if r.Method == http.MethodDelete {
+				delete(resources, r.URL.Path)
+			}
+			mu.Unlock()
+		}
+		handler.ServeHTTP(w, r)
+	}))
+}
+
+func TestWindowsDeploymentStateSurvivesManagerRestart(t *testing.T) {
+	for _, uncertain := range []bool{true, false} {
+		t.Run(fmt.Sprint(uncertain), func(t *testing.T) {
+			var mu sync.Mutex
+			state := ""
+			resourceDeletes := 0
+			server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if strings.Contains(r.URL.Path, "/deployments/") {
+					if strings.HasSuffix(r.URL.Path, "/cancel") {
+						state = "Canceled"
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					switch r.Method {
+					case http.MethodPut:
+						if uncertain {
+							w.WriteHeader(http.StatusInternalServerError)
+							return
+						}
+						state = "Succeeded"
+						w.WriteHeader(http.StatusCreated)
+						return
+					case http.MethodGet:
+						if state == "" {
+							w.WriteHeader(http.StatusNotFound)
+							return
+						}
+						io.WriteString(w, `{"properties":{"provisioningState":"`+state+`"}}`)
+						return
+					case http.MethodDelete:
+						state = ""
+						io.WriteString(w, `{}`)
+						return
+					}
+				}
+				if r.Method == http.MethodDelete {
+					resourceDeletes++
+				}
+				io.WriteString(w, `{}`)
+			}))
+			defer server.Close()
+			c := validConfig()
+			c.OSType = "Windows"
+			c.ImageID = "/images/windows"
+			c.ARMEndpoint = server.URL
+			fresh := func() *AzureVMManager {
+				return &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+			}
+			manager := fresh()
+			_, err := manager.Create(context.Background(), "restart-fixture", "jit")
+			if (err != nil) != uncertain {
+				t.Fatalf("create uncertainty=%v: %v", uncertain, err)
+			}
+			expected := "terminal"
+			if uncertain {
+				expected = "pending"
+			}
+			for _, id := range []string{manager.nicID("restart-fixture"), manager.publicIPID("restart-fixture")} {
+				raw, err := manager.get(context.Background(), id, networkAPIVersion)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var resource struct {
+					Tags map[string]string `json:"tags"`
+				}
+				json.Unmarshal(raw, &resource)
+				if resource.Tags[windowsDeploymentStateTag] != expected || resource.Tags["managed-by"] != "gha-runner-scale-controller" {
+					t.Fatalf("durable state/ownership tags lost: %v", resource.Tags)
+				}
+			}
+			manager = fresh() // No process-local submission knowledge survives.
+			if uncertain {
+				if err := manager.Delete(context.Background(), "restart-fixture"); !errors.Is(err, errResourceNotFound) {
+					t.Fatalf("adopted pending deployment released: %v", err)
+				}
+				mu.Lock()
+				deleted := resourceDeletes
+				state = "Running"
+				mu.Unlock()
+				if deleted != 0 {
+					t.Fatal("restart cleanup deleted resources before deployment visibility")
+				}
+			}
+			if err := manager.Delete(context.Background(), "restart-fixture"); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if resourceDeletes != 3 {
+				t.Fatalf("resource deletes=%d", resourceDeletes)
+			}
+		})
+	}
+}
+
+func TestWindowsSubmissionRequiresDurableMarkerReadback(t *testing.T) {
+	puts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// A no-op PATCH must fail readback before any deployment PUT.
+		io.WriteString(w, `{"tags":{"managed-by":"gha-runner-scale-controller","runner-windows-deployment":"not-submitted"}}`)
+	}))
+	defer server.Close()
+	c := validConfig()
+	c.OSType = "Windows"
+	c.ARMEndpoint = server.URL
+	manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	body := map[string]any{"properties": map[string]any{"osProfile": map[string]any{"customData": "fixture"}}}
+	if err := manager.createRunnerVM(context.Background(), "no-marker", body); err == nil {
+		t.Fatal("submission accepted an unpersisted marker")
+	}
+	if puts != 0 {
+		t.Fatal("deployment submitted before durable marker readback")
+	}
+}
+
+func TestAdoptedWindowsNetworkWithoutKnownMarkerStaysConservative(t *testing.T) {
+	for _, marker := range []string{"", "unknown"} {
+		t.Run(marker, func(t *testing.T) {
+			deletes := 0
+			server := newWindowsTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/deployments/") {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.Method == http.MethodDelete {
+					deletes++
+				}
+				io.WriteString(w, `{}`)
+			}))
+			defer server.Close()
+			c := validConfig()
+			c.OSType = "Windows"
+			c.ARMEndpoint = server.URL
+			manager := &AzureVMManager{config: c, credential: fakeCredential{}, httpClient: server.Client(), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), deploymentPollInterval: time.Millisecond}
+			tags := map[string]string{"managed-by": "gha-runner-scale-controller"}
+			if marker != "" {
+				tags[windowsDeploymentStateTag] = marker
+			}
+			if err := manager.put(context.Background(), manager.nicID("adopted"), networkAPIVersion, map[string]any{"tags": tags}); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Delete(context.Background(), "adopted"); !errors.Is(err, errResourceNotFound) {
+				t.Fatalf("unknown persisted state accepted: %v", err)
+			}
+			if deletes != 0 {
+				t.Fatal("unknown marker released network resources")
+			}
+		})
 	}
 }
