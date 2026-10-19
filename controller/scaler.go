@@ -92,6 +92,27 @@ func (s *runnerState) addIdle(vm RunnerVM) {
 	s.runners[vm.RunnerName] = entry
 }
 
+// observeStatistics marks a fresh SDK statistics message. Nil message polls
+// reuse the SDK snapshot without calling this hook, so they retain corrections.
+func (s *runnerState) observeStatistics(assigned int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assigned = max(0, assigned)
+	s.completedPending = 0
+}
+
+// The SDK emits statistics before job callbacks. This hook distinguishes a new
+// snapshot with the same count (new jobs replacing completed jobs) from nil
+// polls replaying a stale snapshot.
+type scalerMetrics struct{ state *runnerState }
+
+func (m scalerMetrics) RecordStatistics(stats *scaleset.RunnerScaleSetStatistic) {
+	m.state.observeStatistics(stats.TotalAssignedJobs)
+}
+func (scalerMetrics) RecordJobStarted(*scaleset.JobStarted)     {}
+func (scalerMetrics) RecordJobCompleted(*scaleset.JobCompleted) {}
+func (scalerMetrics) RecordDesiredRunners(int)                  {}
+
 func (s *runnerState) setDesired(count int) {
 	s.updateDesired(count, 0)
 }

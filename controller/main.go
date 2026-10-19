@@ -155,7 +155,7 @@ func runPool(parent context.Context, config Config, logger *slog.Logger, gate *p
 			ScaleSetID: scaleSet.ID,
 			MaxRunners: config.ListenerMaxRunners(),
 			Logger:     logger.WithGroup("listener"),
-		})
+		}, listener.WithMetricsRecorder(scalerMetrics{state: scaler.state}))
 		if err != nil {
 			return fmt.Errorf("creating runner scale listener: %w", err)
 		}
