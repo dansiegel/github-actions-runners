@@ -156,6 +156,7 @@ $runnerPools = @(Get-NormalizedRunnerPools)
 $runnerPoolsJson = ConvertTo-Json -InputObject $runnerPools -Compress -Depth 5
 $runnerPoolsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($runnerPoolsJson))
 $primaryPool = $runnerPools[0]
+$needsSharedLinuxImage = @($runnerPools | Where-Object { $_.enabled -ne $false -and $_.osType -cne 'Windows' -and [string]::IsNullOrWhiteSpace($_.imageId) }).Count -gt 0
 
 Write-Host "Target subscription: $SubscriptionId"
 Write-Host "GitHub organization: $GitHubOrganization"
@@ -170,6 +171,7 @@ foreach ($pool in $runnerPools) {
     $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
     Write-Host ("  {0} labels: {1}; image: {2}; OS tag: {3}" -f $pool.name, ($pool.labels -join ', '), $imageSource, $osLabel)
 }
+Write-Host ("Shared Linux image required: {0}" -f $needsSharedLinuxImage.ToString().ToLowerInvariant())
 Write-Host 'Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
 
 Write-Host 'Windows profiles:    explicit qualified imageId required; image build is separate'
@@ -185,7 +187,9 @@ if ($ConfirmSubscription -ne $SubscriptionId) {
 if (-not (Test-Path -LiteralPath $SshPublicKeyFile -PathType Leaf)) {
     throw "SSH public key not found: $SshPublicKeyFile"
 }
-foreach ($command in @('az', 'azd', 'packer', 'git')) {
+$requiredCommands = @('az', 'azd', 'git')
+if ($needsSharedLinuxImage -and [string]::IsNullOrWhiteSpace($RunnerImageId)) { $requiredCommands += 'packer' }
+foreach ($command in $requiredCommands) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "$command is required"
     }
@@ -230,7 +234,7 @@ foreach ($secretName in @('github-app-client-id', 'github-app-private-key', 'git
     az keyvault secret show --vault-name $vaultName --name $secretName --query id --output tsv | Out-Null
 }
 
-if ([string]::IsNullOrWhiteSpace($RunnerImageId)) {
+if ($needsSharedLinuxImage -and [string]::IsNullOrWhiteSpace($RunnerImageId)) {
     $imageName = '{0}-{1}' -f $RunnerImageNamePrefix, (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
     packer init image/runner.pkr.hcl
     packer build `
@@ -241,7 +245,7 @@ if ([string]::IsNullOrWhiteSpace($RunnerImageId)) {
         image/runner.pkr.hcl
     $RunnerImageId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Compute/images/$imageName"
 }
-else {
+elseif (-not [string]::IsNullOrWhiteSpace($RunnerImageId)) {
     $resolvedImageId = az resource show --ids $RunnerImageId --query id --output tsv
     if (-not [string]::Equals($resolvedImageId.Trim(), $RunnerImageId, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Resolved runner image did not match -RunnerImageId'

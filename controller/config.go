@@ -188,6 +188,11 @@ func (c *Config) validate(requireImage bool) error {
 	if c.OSType == "Windows" && requireImage && strings.TrimSpace(c.ImageID) == "" {
 		return fmt.Errorf("Windows profiles require an explicit qualified imageId")
 	}
+	if c.OSType == "Windows" {
+		if err := validateWindowsInputs(*c); err != nil {
+			return err
+		}
+	}
 	if c.OSType == "Linux" && strings.TrimSpace(c.VMSSHPublicKey) == "" {
 		return fmt.Errorf("RUNNER_ADMIN_SSH_PUBLIC_KEY is required for Linux")
 	}
