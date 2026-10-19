@@ -53,7 +53,7 @@ type AzureVMManager struct {
 	credential             azcore.TokenCredential
 	httpClient             *http.Client
 	logger                 *slog.Logger
-	windowsDeployments     sync.Map      // submitted deployments not yet observed terminal
+	windowsDeployments     sync.Map      // true: uncertain submission; false: known terminal/not submitted
 	deploymentPollInterval time.Duration // zero uses the production three-second interval
 }
 
@@ -103,6 +103,10 @@ func (m *AzureVMManager) Create(ctx context.Context, runnerName, encodedJITConfi
 		"github-runner-name": runnerName,
 		"runner-created-at":  createdAt.Format(time.RFC3339),
 		"ephemeral":          "true",
+	}
+
+	if m.config.OSType == "Windows" {
+		tags[windowsDeploymentStateTag] = "not-submitted"
 	}
 
 	if m.config.PublicIP {
@@ -235,6 +239,9 @@ func (m *AzureVMManager) Delete(ctx context.Context, vmName string) error {
 	}
 	if err := m.delete(ctx, m.publicIPID(vmName), networkAPIVersion); err != nil && !errors.Is(err, errResourceNotFound) {
 		result = errors.Join(result, fmt.Errorf("deleting public IP for %s: %w", vmName, err))
+	}
+	if result == nil {
+		m.windowsDeployments.Delete(vmName)
 	}
 	return result
 }
