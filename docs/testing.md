@@ -4,12 +4,15 @@
 
 Controller unit tests cover:
 
-- configuration rejects any nonzero minimum and any per-pool maximum above 20;
-- a desired count of 20 creates 20 VMs;
+- configuration rejects any nonzero minimum and invalid caps, while zero or omitted caps follow demand;
+- pool JSON preserves independent CPU/disk settings, optional image overrides, optional caps, and disabled profiles;
+- the eight profile labels map to the expected SKUs and tiers, with only small profiles disabled and `avp-linux-l` aliasing the existing `avp-linux` identity;
+- omitted or empty image overrides inherit the shared image; explicit overrides are preserved; unknown fields and non-string/null image overrides are rejected;
+- demand above 20 is supported, and positive optional caps are respected;
 - a desired count of zero removes all known-idle VMs;
 - busy runners survive queue-driven scale-down and are removed after `JobCompleted`;
 - stopped orphan VMs are reconciled;
-- Azure VM payloads use the managed image and contain no managed identity;
+- Azure VM payloads use each pool's selected image and contain no managed identity;
 - JIT data is envelope-encoded, cloud-init launches with the runner account's home directory and JIT environment, and the VM powers off on exit.
 
 Run with the pinned toolchain:
@@ -50,6 +53,7 @@ Syntax-check deployment/image scripts:
 ```bash
 bash -n scripts/deploy-azure.sh
 bash -n scripts/destroy-azure.sh
+pwsh -NoProfile -File scripts/Test-RunnerDiskTier.ps1
 bash -n image/scripts/install-runner-toolchain.sh
 bash image/scripts/test-runner-maintenance-policy.sh
 ```
@@ -69,7 +73,7 @@ settings. They mock systemd, so the real candidate image must also reboot and pa
 For a candidate rollout, record the image resource ID, manifest, booted kernel, package
 inventory hash and previous image ID. Run an isolated candidate job with unchanged test
 budgets and inspect maintenance unit/process state during the job. Only then choose a
-controller rollout. Reverting `RUNNER_IMAGE_ID` affects future VMs; leave active jobs
+controller rollout. Reverting `RUNNER_IMAGE_ID` affects future VMs in inheriting pools; revert a pinned pool's `imageId` separately if needed. Leave active jobs
 and their disks alone. An image update does not establish that unrelated TCP or storage
 failures are fixed.
 
@@ -99,7 +103,7 @@ on: workflow_dispatch
 
 jobs:
   verify:
-    runs-on: linux-2vcpu
+    runs-on: avp-linux-m
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v5
@@ -119,6 +123,8 @@ jobs:
       - run: docker run --rm hello-world
 ```
 
+Repeat with one complete profile label per job for every enabled profile, including both `avp-linux` and its `avp-linux-l` alias to verify compatibility. Each alias must route to the same logical scale set and unchanged base hardware/image. Do not target the disabled small profiles before qualification.
+
 Verify the following lifecycle:
 
 1. queued job causes one tagged VM to appear;
@@ -131,7 +137,7 @@ Verify the following lifecycle:
 
 ## Burst test
 
-Use a workflow-dispatch matrix matching one pool's deployed capacity only after quota is confirmed. Observe that no more than that pool's configured maximum is created, verify other pools are unaffected, then verify complete scale-to-zero. Test combined peaks only in a controlled acceptance window with an approved spend limit; local source validation does not justify a paid burst.
+Use a bounded workflow-dispatch matrix only after quota and spend are approved, especially for an uncapped profile. Observe that demand is served and any explicit per-pool cap is respected, verify other pools are unaffected, then verify complete scale-to-zero. Test combined peaks only in a controlled acceptance window with an approved spend limit; local source validation does not justify a paid burst.
 
 ## Completion requirements
 

@@ -8,7 +8,7 @@
 4. Add the three GitHub App secrets to the output Key Vault.
 5. Run the deployment script again without bootstrap-only.
 6. Grant the GitHub runner group access to intended trusted repositories.
-7. Run a smoke workflow for each pool before changing production workflow labels.
+7. Run a smoke workflow selecting exactly one complete profile label for each enabled pool before changing production workflow labels.
 
 The deployment scripts refuse mutation unless the caller repeats the subscription passed through `-SubscriptionId` / `--subscription-id`. They create a new timestamped managed image and never delete an old image automatically.
 
@@ -20,7 +20,7 @@ Create a GitHub App owned by the target organization with:
 - Installation target: the target organization
 - Repository access: repositories allowed to use the runner group
 
-No webhook is required; each controller long-polls its runner-scale-set message service.
+No webhook is required; each enabled pool has an independent listener in the shared controller, long-polling its runner-scale-set message service.
 
 ## Preflight
 
@@ -32,20 +32,20 @@ az vm list-usage --location '<region>' --output table
 az vm list-skus --location '<region>' --resource-type virtualMachines --all --output table
 ```
 
-Calculate peak demand across every pool. For example, eight D2s v5 runners plus four D4s v5 runners request 32 Dsv5-family vCPUs. Leave headroom for other Azure workloads and transient replacement operations.
+Estimate simultaneous demand across every enabled profile. Uncapped profiles do not have a configured peak; use workload concurrency, or set explicit positive caps where needed. Verify regional and family quotas and leave headroom for other Azure workloads and transient replacements. Keep the example one-core profiles disabled until a compatible Gen2/NVMe Compute Gallery image and subscription are qualified.
 
-## Observe controllers
+## Observe the shared controller
 
-List all deployed pool controllers:
+List the deployed shared controller:
 
 ```bash
 az containerapp list \
   --resource-group "$(azd env get-value AZURE_RESOURCE_GROUP)" \
-  --query "[?tags.purpose=='github-runner-scale-set-listener'].{name:name,pool:tags.'runner-scale-set',size:tags.'runner-vm-size',max:tags.'runner-max-capacity'}" \
+  --query "[?tags.purpose=='github-runner-scale-set-listener'].{name:name,profiles:tags.'runner-pool-count'}" \
   --output table
 ```
 
-Follow one pool's logs using the name returned above:
+Follow all pool listeners using the controller name returned above:
 
 ```bash
 az containerapp logs show \
@@ -91,21 +91,24 @@ Do not manually delete a running VM unless the associated job is known to be aba
 
 ## Change or remove pools
 
-Pool order is stable infrastructure configuration. Pool zero preserves the original controller resource name for upgrade compatibility. Renaming pool zero updates that controller in place; reordering pools can move a controller to a different queue and should be treated as a controlled migration.
+Pool order does not affect the shared controller resource name. Adding a profile is an ordinary reprovision. To disable or retire a profile safely:
 
-Adding a pool is an ordinary reprovision. To retire a pool safely:
-
-1. Remove repository access to the pool or change every workflow away from its name.
+1. Remove repository access to the profile or change every workflow away from all of its labels. The `avp-linux` and `avp-linux-l` labels belong to the same profile; existing consumers have no migration deadline.
 2. Let its jobs finish and verify no Azure VM has `runner-scale-set=<pool-name>`.
-3. Remove the pool from JSON and reprovision.
-4. Delete the obsolete Container App explicitly after resolving its name from the `runner-scale-set` tag.
-5. Delete the logical scale set in GitHub organization settings if it is no longer needed.
+3. Set `enabled` to false, or remove the profile from JSON, and reprovision the shared controller.
+4. Delete the logical scale set in GitHub organization settings if it is no longer needed.
 
-Step 4 is explicit because ARM incremental deployments do not delete resources removed from a loop. Never delete a controller while its pool still has running VMs; it owns their reconciliation and cleanup.
+Keep `name` stable when changing a label, SKU, or image: it is the logical scale-set identity and Azure cleanup tag. In particular, preserve `name: "avp-linux"` when adding its `avp-linux-l` alias; do not create a competing scale set. Follow the [compatibility migration](migration.md#preserve-existing-avp-linux-consumers).
+
+A disabled or removed profile has no running listener or reconciler. Drain it first so active VMs do not lose their cleanup owner.
+
+### Migrate older controller-per-pool deployments
+
+The original `gha-scale-controller-<environment-token>` app is updated in place. ARM incremental deployments do not delete extra apps created by older per-pool loops. Before activating the shared controller, stop routing new work, drain all affected pools, then explicitly stop and retire those extra apps after resolving their names from the old `runner-scale-set` tags. Do not run an old per-pool controller and the shared listener against the same scale set. Keep only the original app, verify one healthy listener per enabled profile, and restore workflow access after smoke testing.
 
 ## Suspend provisioning
 
-First remove repository access or change workflows away from the target pool. Then scale only its controller down:
+To suspend one profile, stop routing work to it, drain its VMs, then set `enabled` to false and reprovision. To suspend the entire platform, first drain every profile, then scale the shared controller down:
 
 ```bash
 az containerapp update \
@@ -115,19 +118,19 @@ az containerapp update \
   --max-replicas 0
 ```
 
-Restore the Bicep-declared one-replica controller with `azd provision`. While it is suspended, finished VMs power off but are not reconciled/deleted until it returns.
+Restore the Bicep-declared one-replica controller with `azd provision`. While it is suspended, finished VMs power off but are not reconciled/deleted until it returns. Suspending the shared controller affects every enabled profile.
 
 ## Rotate the GitHub App key
 
 1. Generate a new private key in GitHub App settings.
 2. Update `github-app-private-key` in Key Vault using `az keyvault secret set --file`.
-3. Reprovision or restart every controller revision.
+3. Reprovision or restart the shared controller revision.
 4. Verify every listener creates a message session.
 5. Revoke the old key in GitHub.
 
 ## Refresh the runner image
 
-Rerun the full deployment script. It builds one timestamped managed image, points every controller at its resource ID, and rolls the Container App revisions. Existing jobs continue on the old image; only newly created VMs use the new image.
+Rerun the full deployment script. It builds one timestamped managed image, updates the shared `RUNNER_IMAGE_ID`, and rolls the Container App revision. Pools with a nonempty `imageId` override keep that image; only inheriting pools use the new default for newly created VMs. Pin the currently qualified image in the private `avp-linux` pool entry before changing the shared default so legacy consumers retain their image. Existing jobs continue on their original image. Qualify per-pool image overrides before enabling a new VM family, including the disabled Gen2/NVMe small profiles.
 
 After no VMs reference an old managed image, list and delete it explicitly if desired. Image deletion is intentionally not automated because it is destructive.
 
@@ -135,7 +138,7 @@ After no VMs reference an old managed image, list and delete it explicitly if de
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Jobs stay queued and no VM appears | Pool controller stopped, runner-group access missing, wrong `runs-on`, or GitHub App permission missing | Inspect the controller tagged for that pool and GitHub runner group |
+| Jobs stay queued and no VM appears | Shared controller stopped, profile disabled, runner-group access missing, wrong `runs-on`, or GitHub App permission missing | Inspect the shared controller, the profile setting, and GitHub runner group |
 | VM creation returns quota/capacity error | Combined pool capacity exceeds regional/family quota or SKU capacity. `avp-linux` at 12 `Standard_D4s_v5` runners is 48 cores against a 50-core `standardDSv5Family` limit in `eastus2`, so a replacement VM has no headroom | The controller pauses creates after a quota error. Raise the family quota or lower pool capacity before expecting replacements to succeed |
 | Jobs stay assigned and new VMs stop without starting a job | A previous create registered a GitHub runner, then the VM died or the listener exited before that runner connected. GitHub keeps the job on the dead registration | Confirm controller logs show `Removed GitHub runner registration`. Delete leftover `avp-linux-*` runners that have no VM |
 | VM exists but runner never becomes online | Image/bootstrap failure or GitHub connectivity | Inspect VM boot diagnostics and serial console output |

@@ -9,14 +9,14 @@
 
 ## Workflow change
 
-Replace a GitHub-hosted Linux label with the pool name appropriate for the workload:
+Replace a GitHub-hosted Linux label with the complete profile label appropriate for the workload:
 
 ```yaml
 # Before
 runs-on: ubuntu-latest
 
 # After: ordinary build
-runs-on: linux-2vcpu
+runs-on: avp-linux-m
 ```
 
 Use a larger independently scaled pool only where the job benefits from it:
@@ -24,12 +24,18 @@ Use a larger independently scaled pool only where the job benefits from it:
 ```yaml
 jobs:
   integration:
-    runs-on: linux-4vcpu
+    runs-on: avp-linux-lp
 ```
 
-Runner scale-set job routing uses the scale-set name; do not use a list such as `[self-hosted, linux, x64]` for these pools.
+Each job selects exactly one complete CPU/memory/disk label. Do not compose size and disk labels or use a list such as `[self-hosted, linux, x64]` for these pools. `avp-linux-lp` selects 4 CPUs / 16 GiB with P20; `avp-linux-l` selects the same CPU/memory size with P10. Both disks are Premium SSD. The supported size codes are `s`, `m`, `l`, and `xl`, with an attached `p` for P20. Keep the two `s` profiles disabled until image and subscription qualification succeeds.
 
 The VM image already contains .NET 10, Node 24, Docker/Buildx/Compose, Azure CLI and Bicep CLI, `azd`, PowerShell, Java 21, and Aspire. Keep setup actions that enforce an exact project SDK/tool version, but remove redundant installs only after comparing workflow behavior. Image presence is an optimization, not a reason to weaken repository-pinned version policy.
+
+## Preserve existing `avp-linux` consumers
+
+Keep the existing logical scale-set `name: "avp-linux"` and configure `labels: ["avp-linux", "avp-linux-l"]` on that same set. Do not rename it to `avp-linux-l` or create a second scale set with the `avp-linux` label: that would orphan the original identity or leave competing routing labels. Preserve the existing runner group, priority, `Standard_D4s_v5` CPU/memory size, P10 disk, and qualified image. Set a private per-pool `imageId` to pin that image before changing the shared `RUNNER_IMAGE_ID`. Removing the former capacity cap is the explicitly requested fleet-wide uncapped behavior; it does not require changing hardware or images.
+
+Existing workflows may continue using `runs-on: avp-linux` indefinitely. `runs-on: avp-linux-l` is an alias for the identical base profile; a repository opts into another profile only when its workflow changes. Verify that the existing scale set adopts both labels and that exactly one healthy listener owns it. If a previous prototype created another logical set for the large P10 profile, stop routing to it, drain its jobs and VMs, and explicitly retire that set before reusing any of its labels. Repository changes and deployment require their own rollout approval; editing this catalog does not perform either.
 
 ## Recommended rollout
 
@@ -48,7 +54,7 @@ The runner process executes directly on the VM and belongs to the Docker group. 
 
 ## Capacity interaction
 
-Repositories granted access share each pool's configured capacity. GitHub assigns work according to runner-group access and queue state; there is no reserved capacity per repository. Separate pools isolate size classes and queues, but they still share Azure subscription quotas and cost. Use workflow `concurrency` and matrix `max-parallel` as additional budget controls.
+Repositories granted access share each pool's configured capacity. GitHub assigns work according to runner-group access and queue state; there is no reserved capacity per repository. Separate pools isolate CPU/memory/disk profiles and queues within one shared controller, but they still share Azure subscription quotas and cost. Use workflow `concurrency` and matrix `max-parallel` as additional budget controls.
 
 ## Rollback
 

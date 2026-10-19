@@ -6,7 +6,7 @@ GITHUB_ORGANIZATION=""
 RUNNER_GROUP="default"
 RUNNER_POOLS_FILE=""
 RUNNER_SCALE_SET_NAME="azure-linux"
-RUNNER_MAX_CAPACITY="10"
+RUNNER_MAX_CAPACITY="0"
 RUNNER_VM_SIZE="Standard_D4s_v5"
 RUNNER_VM_PRIORITY="Regular"
 RUNNER_LABELS=""
@@ -70,11 +70,20 @@ fi
 if [[ -n "$RUNNER_POOLS_FILE" ]]; then
   [[ -f "$RUNNER_POOLS_FILE" ]] || { echo "Runner pool configuration not found: $RUNNER_POOLS_FILE" >&2; exit 2; }
   RUNNER_POOLS_JSON="$(jq -ce '
-    if type != "array" or length < 1 or length > 8 then error("configuration must contain 1-8 pools") else . end
+    if type != "array" or length < 1 then error("configuration must contain at least one pool") else . end
     | map(
-        if (.name | type) != "string" or (.name | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") | not) then error("invalid pool name") else . end
+        if type != "object" then error("each pool must be an object") else . end
+        | if (keys - ["name", "vmSize", "maxRunners", "priority", "labels", "osDiskTier", "enabled", "imageId"] | length) != 0 then error("unknown pool configuration field") else . end
+        | if (.name | type) != "string" or (.name | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") | not) then error("invalid pool name") else . end
         | if (.vmSize | type) != "string" or (.vmSize | test("^Standard_[A-Za-z0-9_]+$") | not) then error("invalid VM size for " + .name) else . end
-        | if (.maxRunners | type) != "number" or (.maxRunners | floor) != .maxRunners or .maxRunners < 1 or .maxRunners > 20 then error("maxRunners must be 1-20 for " + .name) else . end
+        | if has("maxRunners") then
+            if (.maxRunners | type) != "number" or (.maxRunners | floor) != .maxRunners or .maxRunners < 0 or .maxRunners > 2147483647 then error("maxRunners must be an integer from 0 through 2147483647 for " + .name) else . end
+          else . end
+        | if has("enabled") and (.enabled | type) != "boolean" then error("enabled must be a boolean for " + .name) else . end
+        | if has("imageId") then
+            if (.imageId | type) != "string" then error("imageId must be a string for " + .name)
+            else .imageId |= gsub("^\\s+|\\s+$"; "") end
+          else . end
         | .priority = (.priority // "Regular")
         | if (.priority != "Regular" and .priority != "Spot") then error("priority must be Regular or Spot for " + .name) else . end
         | .osDiskTier = (if .osDiskTier == null then "" else .osDiskTier end)
@@ -91,12 +100,19 @@ if [[ -n "$RUNNER_POOLS_FILE" ]]; then
   ' "$RUNNER_POOLS_FILE")"
 else
   [[ "$RUNNER_SCALE_SET_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "invalid --runner-scale-set-name" >&2; exit 2; }
-  [[ "$RUNNER_MAX_CAPACITY" =~ ^[0-9]+$ ]] && (( RUNNER_MAX_CAPACITY >= 1 && RUNNER_MAX_CAPACITY <= 20 )) || { echo "--runner-max-capacity must be 1-20" >&2; exit 2; }
+  [[ "$RUNNER_MAX_CAPACITY" =~ ^[0-9]+$ ]] && RUNNER_MAX_CAPACITY="$(jq -cen --arg value "$RUNNER_MAX_CAPACITY" '$value | tonumber | select(. >= 0 and . <= 2147483647)')" || { echo "--runner-max-capacity must be an integer from 0 through 2147483647" >&2; exit 2; }
   [[ "$RUNNER_VM_SIZE" =~ ^Standard_[A-Za-z0-9_]+$ ]] || { echo "invalid --runner-vm-size" >&2; exit 2; }
   [[ "$RUNNER_VM_PRIORITY" == "Regular" || "$RUNNER_VM_PRIORITY" == "Spot" ]] || { echo "--runner-vm-priority must be Regular or Spot" >&2; exit 2; }
   if [[ -z "$RUNNER_LABELS" ]]; then RUNNER_LABELS="$RUNNER_SCALE_SET_NAME"; fi
   RUNNER_POOLS_JSON="$(jq -cn --arg name "$RUNNER_SCALE_SET_NAME" --arg vmSize "$RUNNER_VM_SIZE" --argjson maxRunners "$RUNNER_MAX_CAPACITY" --arg priority "$RUNNER_VM_PRIORITY" --arg labels "$RUNNER_LABELS" '[{name:$name,vmSize:$vmSize,maxRunners:$maxRunners,priority:$priority,labels:($labels | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))}]')"
 fi
+
+# Check routing across the complete array, including disabled profiles, so an
+# enablement change cannot introduce an ambiguous label later.
+RUNNER_POOLS_JSON="$(jq -ce '
+  if ([.[] | .labels[] | ascii_downcase] | length) != ([.[] | .labels[] | ascii_downcase] | unique | length) then error("runner labels must be unique across all pools") else . end
+  | if any(.[]; .enabled != false) then . else error("at least one runner pool must be enabled") end
+' <<<"$RUNNER_POOLS_JSON")"
 
 # azd interpolates environment values into a JSON parameters document before
 # parsing it. Base64 keeps the structured pool definition safe for that string
@@ -104,7 +120,7 @@ fi
 RUNNER_POOLS_BASE64="$(printf '%s' "$RUNNER_POOLS_JSON" | base64 | tr -d '\r\n')"
 
 PRIMARY_POOL_NAME="$(jq -r '.[0].name' <<<"$RUNNER_POOLS_JSON")"
-PRIMARY_POOL_MAX="$(jq -r '.[0].maxRunners' <<<"$RUNNER_POOLS_JSON")"
+PRIMARY_POOL_MAX="$(jq -r '.[0].maxRunners // 0' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_VM_SIZE="$(jq -r '.[0].vmSize' <<<"$RUNNER_POOLS_JSON")"
 PRIMARY_POOL_PRIORITY="$(jq -r '.[0].priority' <<<"$RUNNER_POOLS_JSON")"
 
@@ -112,8 +128,10 @@ echo "Target subscription: $SUBSCRIPTION_ID"
 echo "GitHub organization: $GITHUB_ORGANIZATION"
 echo "Resource group:      $RESOURCE_GROUP"
 echo "Location:            $LOCATION"
+echo "Runner controller:   one shared Container App (0.25 vCPU / 0.5 GiB)"
 echo "Runner pools:"
-jq -r '.[] | "  \(.name): 0..\(.maxRunners) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
+jq -r '.[] | "  \(.name): \(if .enabled == false then "disabled" elif (.maxRunners // 0) == 0 then "0..demand (uncapped)" else "0..\(.maxRunners)" end) \(.vmSize) (\(.priority)); OS disk tier: \(if (.osDiskTier // "") == "" then "default (128 GiB/P10)" else .osDiskTier end)"' <<<"$RUNNER_POOLS_JSON"
+jq -r '.[] | "  \(.name) labels: \(.labels | join(", ")); image: \(if (.imageId // "") == "" then "shared RUNNER_IMAGE_ID" else "pool imageId override" end)"' <<<"$RUNNER_POOLS_JSON"
 echo "Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire"
 
 if [[ "$MODE" != "apply" ]]; then
@@ -200,4 +218,4 @@ azd env set RUNNER_CONTROLLER_IMAGE "$ACR_LOGIN_SERVER/runner-controller:$CONTRO
 azd env set DEPLOY_RUNNER_CONTROLLER "true"
 azd provision --environment "$ENVIRONMENT_NAME" --no-prompt
 
-echo "Deployment complete. Workflow labels: $(jq -r '[.[].name] | join(", ")' <<<"$RUNNER_POOLS_JSON")"
+echo "Deployment complete. Workflow labels: $(jq -r '[.[] | select(.enabled != false) | .labels[]] | join(", ")' <<<"$RUNNER_POOLS_JSON")"

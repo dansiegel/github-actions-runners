@@ -1,20 +1,77 @@
 [
   {
-    "name": "linux-2vcpu",
-    "vmSize": "Standard_D2s_v5",
-    "maxRunners": 8,
+    "name": "avp-linux",
+    "vmSize": "Standard_D4s_v5",
     "priority": "Regular",
     "labels": [
-      "linux-2vcpu"
-    ]
+      "avp-linux",
+      "avp-linux-l"
+    ],
+    "osDiskTier": "P10"
   },
   {
-    "name": "linux-4vcpu",
-    "vmSize": "Standard_D4s_v5",
-    "maxRunners": 4,
+    "name": "avp-linux-s",
+    "vmSize": "Standard_F1als_v7",
     "priority": "Regular",
     "labels": [
-      "linux-4vcpu"
-    ]
+      "avp-linux-s"
+    ],
+    "osDiskTier": "P10",
+    "enabled": false
+  },
+  {
+    "name": "avp-linux-sp",
+    "vmSize": "Standard_F1als_v7",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-sp"
+    ],
+    "osDiskTier": "P20",
+    "enabled": false
+  },
+  {
+    "name": "avp-linux-m",
+    "vmSize": "Standard_D2s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-m"
+    ],
+    "osDiskTier": "P10"
+  },
+  {
+    "name": "avp-linux-mp",
+    "vmSize": "Standard_D2s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-mp"
+    ],
+    "osDiskTier": "P20"
+  },
+  {
+    "name": "avp-linux-lp",
+    "vmSize": "Standard_D4s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-lp"
+    ],
+    "osDiskTier": "P20"
+  },
+  {
+    "name": "avp-linux-xl",
+    "vmSize": "Standard_D8s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-xl"
+    ],
+    "osDiskTier": "P10"
+  },
+  {
+    "name": "avp-linux-xlp",
+    "vmSize": "Standard_D8s_v5",
+    "priority": "Regular",
+    "labels": [
+      "avp-linux-xlp"
+    ],
+    "osDiskTier": "P20"
   }
 ]
