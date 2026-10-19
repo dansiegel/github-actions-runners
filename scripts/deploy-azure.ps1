@@ -33,6 +33,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
+function Get-RunnerAdminSshPublicKey {
+    param([bool] $HasLinux, [string] $KeyFile)
+    if (-not $HasLinux) { return '' }
+    if (-not (Test-Path -LiteralPath $KeyFile -PathType Leaf)) { throw "SSH public key not found: $KeyFile" }
+    return (Get-Content -LiteralPath $KeyFile -Raw).Trim()
+}
+
 function Get-NormalizedRunnerPools {
     if ([string]::IsNullOrWhiteSpace($RunnerPoolsFile)) {
         $labels = @($RunnerLabels | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -68,7 +75,7 @@ function Get-NormalizedRunnerPools {
             throw 'Each runner pool must be a JSON object'
         }
         foreach ($property in $pool.PSObject.Properties.Name) {
-            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId')) {
+            if ($property -cnotin @('name', 'vmSize', 'maxRunners', 'priority', 'labels', 'osDiskTier', 'enabled', 'imageId', 'osType')) {
                 throw "Unknown runner pool configuration field: $property"
             }
         }
@@ -102,6 +109,14 @@ function Get-NormalizedRunnerPools {
             throw "Runner pool '$name' imageId must be a string"
         }
 
+        $hasOSType = $null -ne $pool.PSObject.Properties['osType']
+        if ($hasOSType -and ($pool.osType -isnot [string] -or $pool.osType -cnotin @('Linux', 'Windows'))) {
+            throw "Runner pool '$name' osType must be Linux or Windows"
+        }
+        if ($pool.osType -ceq 'Windows' -and $pool.enabled -ne $false -and [string]::IsNullOrWhiteSpace([string] $pool.imageId)) {
+            throw "Enabled Windows pool '$name' requires an explicit qualified imageId"
+        }
+
         $priority = if ($null -eq $pool.priority -or [string]::IsNullOrWhiteSpace([string] $pool.priority)) { 'Regular' } else { ([string] $pool.priority).Trim() }
         if ($priority -notin @('Regular', 'Spot')) {
             throw "Runner pool '$name' priority must be Regular or Spot"
@@ -114,9 +129,17 @@ function Get-NormalizedRunnerPools {
 
         $labels = @($pool.labels | ForEach-Object { ([string] $_).Trim() } | Where-Object { $_ })
         if ($labels.Count -eq 0) { $labels = @($name) }
+        $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+        $profileLabelCount = 0
         foreach ($label in $labels) {
-            if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            if ($label -in @('Linux', 'Windows', 'macOS')) {
+                if ($label -ine $osLabel) { throw "Runner OS label '$label' conflicts with osType $osLabel" }
+            } else {
+                $profileLabelCount++
+                if (-not $allLabels.Add($label)) { throw "Runner label '$label' is duplicated across the pool configuration" }
+            }
         }
+        if ($profileLabelCount -eq 0) { throw 'Runner labels require a profile label in addition to the operating system' }
         $normalizedPool = [ordered]@{
             name       = $name
             vmSize     = $vmSize
@@ -127,6 +150,7 @@ function Get-NormalizedRunnerPools {
         if ($hasMaxRunners) { $normalizedPool.maxRunners = [int] $pool.maxRunners }
         if ($hasEnabled) { $normalizedPool.enabled = $pool.enabled }
         if ($hasImageId) { $normalizedPool.imageId = $pool.imageId.Trim() }
+        if ($hasOSType) { $normalizedPool.osType = $pool.osType }
         $normalized += $normalizedPool
     }
     if (@($normalized | Where-Object { $_.enabled -ne $false }).Count -eq 0) {
@@ -139,6 +163,8 @@ $runnerPools = @(Get-NormalizedRunnerPools)
 $runnerPoolsJson = ConvertTo-Json -InputObject $runnerPools -Compress -Depth 5
 $runnerPoolsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($runnerPoolsJson))
 $primaryPool = $runnerPools[0]
+$hasEnabledLinux = @($runnerPools | Where-Object { $_.enabled -ne $false -and $_.osType -cne 'Windows' }).Count -gt 0
+$needsSharedLinuxImage = @($runnerPools | Where-Object { $_.enabled -ne $false -and $_.osType -cne 'Windows' -and [string]::IsNullOrWhiteSpace($_.imageId) }).Count -gt 0
 
 Write-Host "Target subscription: $SubscriptionId"
 Write-Host "GitHub organization: $GitHubOrganization"
@@ -149,10 +175,15 @@ Write-Host 'Runner pools:'
 foreach ($pool in $runnerPools) {
     $capacity = if ($pool.enabled -eq $false) { 'disabled' } elseif (-not $pool.maxRunners) { '0..demand (uncapped)' } else { "0..$($pool.maxRunners)" }
     Write-Host ("  {0}: {1} {2} ({3}); OS disk tier: {4}" -f $pool.name, $capacity, $pool.vmSize, $pool.priority, $(if ($pool.osDiskTier) { $pool.osDiskTier } else { 'default (128 GiB/P10)' }))
-    $imageSource = if ($pool.imageId) { 'pool imageId override' } else { 'shared RUNNER_IMAGE_ID' }
-    Write-Host ("  {0} labels: {1}; image: {2}" -f $pool.name, ($pool.labels -join ', '), $imageSource)
+    $imageSource = if ($pool.imageId) { 'pool imageId override' } elseif ($pool.osType -ceq 'Windows') { 'unqualified Windows image (disabled)' } else { 'shared RUNNER_IMAGE_ID' }
+    $osLabel = if ($pool.osType -ceq 'Windows') { 'Windows' } else { 'Linux' }
+    Write-Host ("  {0} labels: {1}; image: {2}; OS tag: {3}" -f $pool.name, ($pool.labels -join ', '), $imageSource, $osLabel)
 }
-Write-Host 'Runner image:        .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
+Write-Host ("Linux SSH key required: {0}" -f $hasEnabledLinux.ToString().ToLowerInvariant())
+Write-Host ("Shared Linux image required: {0}" -f $needsSharedLinuxImage.ToString().ToLowerInvariant())
+Write-Host 'Default Linux image: .NET 10, Node 24, Docker/Buildx, Azure CLI/Bicep, azd, PowerShell, Aspire'
+
+Write-Host 'Windows profiles:    explicit qualified imageId required; image build is separate'
 
 if ($Mode -ne 'Apply') {
     Write-Host 'Dry run only. No Azure resources were changed.'
@@ -162,10 +193,10 @@ if ($Mode -ne 'Apply') {
 if ($ConfirmSubscription -ne $SubscriptionId) {
     throw "Refusing Azure mutation: -ConfirmSubscription must exactly equal $SubscriptionId"
 }
-if (-not (Test-Path -LiteralPath $SshPublicKeyFile -PathType Leaf)) {
-    throw "SSH public key not found: $SshPublicKeyFile"
-}
-foreach ($command in @('az', 'azd', 'packer', 'git')) {
+$adminSshPublicKey = Get-RunnerAdminSshPublicKey -HasLinux $hasEnabledLinux -KeyFile $SshPublicKeyFile
+$requiredCommands = @('az', 'azd', 'git')
+if ($needsSharedLinuxImage -and [string]::IsNullOrWhiteSpace($RunnerImageId)) { $requiredCommands += 'packer' }
+foreach ($command in $requiredCommands) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "$command is required"
     }
@@ -185,7 +216,7 @@ catch {
 azd env set AZURE_SUBSCRIPTION_ID $SubscriptionId
 azd env set AZURE_LOCATION $Location
 azd env set AZURE_RESOURCE_GROUP $ResourceGroup
-azd env set ADMIN_SSH_PUBLIC_KEY (Get-Content -LiteralPath $SshPublicKeyFile -Raw).Trim()
+azd env set ADMIN_SSH_PUBLIC_KEY $adminSshPublicKey
 azd env set GITHUB_ORGANIZATION $GitHubOrganization
 azd env set RUNNER_GROUP $RunnerGroup
 azd env set RUNNER_SCALE_SET_NAME $primaryPool.name
@@ -210,7 +241,7 @@ foreach ($secretName in @('github-app-client-id', 'github-app-private-key', 'git
     az keyvault secret show --vault-name $vaultName --name $secretName --query id --output tsv | Out-Null
 }
 
-if ([string]::IsNullOrWhiteSpace($RunnerImageId)) {
+if ($needsSharedLinuxImage -and [string]::IsNullOrWhiteSpace($RunnerImageId)) {
     $imageName = '{0}-{1}' -f $RunnerImageNamePrefix, (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
     packer init image/runner.pkr.hcl
     packer build `
@@ -221,7 +252,7 @@ if ([string]::IsNullOrWhiteSpace($RunnerImageId)) {
         image/runner.pkr.hcl
     $RunnerImageId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Compute/images/$imageName"
 }
-else {
+elseif (-not [string]::IsNullOrWhiteSpace($RunnerImageId)) {
     $resolvedImageId = az resource show --ids $RunnerImageId --query id --output tsv
     if (-not [string]::Equals($resolvedImageId.Trim(), $RunnerImageId, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Resolved runner image did not match -RunnerImageId'

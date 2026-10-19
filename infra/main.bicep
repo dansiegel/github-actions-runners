@@ -38,7 +38,7 @@ param runnerImageId string = ''
 ])
 param runnerVmPriority string = 'Regular'
 
-@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, optional maxRunners (zero or omitted is uncapped), priority, labels, osDiskTier, and optional enabled (defaults true). Empty uses the single-pool parameters for compatibility.')
+@description('Optional base64-encoded JSON array of independently scaled runner pools. Each item accepts name, vmSize, optional maxRunners (zero or omitted is uncapped), priority, labels, osDiskTier, optional enabled (defaults true), imageId, and osType (Linux default; Windows requires a qualified imageId). Empty uses the single-pool parameters for compatibility.')
 param runnerPoolsBase64 string = ''
 
 @description('Linux admin user for emergency access. The subnet NSG denies inbound Internet traffic.')

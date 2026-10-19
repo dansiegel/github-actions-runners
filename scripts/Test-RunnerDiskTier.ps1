@@ -34,7 +34,7 @@ function Test-PoolDryRun {
         $normalized = @(Get-NormalizedRunnerPools)
         $source = Get-Content -LiteralPath $poolFile -Raw | ConvertFrom-Json -NoEnumerate
         for ($index = 0; $index -lt $source.Count; $index++) {
-            foreach ($field in @('maxRunners', 'enabled', 'imageId')) {
+            foreach ($field in @('maxRunners', 'enabled', 'imageId', 'osType')) {
                 $present = $null -ne $source[$index].PSObject.Properties[$field]
                 if ($normalized[$index].Contains($field) -ne $present) { throw "Normalization changed presence of $field for $Name" }
                 if ($present) {
@@ -54,7 +54,31 @@ function Test-PoolDryRun {
     }
 }
 
+$sshFixture = $poolFile + '.pub'
+$sshHelper = $deploymentAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RunnerAdminSshPublicKey' }, $false)
+if ($null -eq $sshHelper) { throw 'SSH prerequisite helper was not found' }
+. ([scriptblock]::Create($sshHelper.Extent.Text))
+
 try {
+    # Pure prerequisite checks: no Apply path, CLI stub, or Azure operation.
+    if ((Get-RunnerAdminSshPublicKey -HasLinux $false -KeyFile $sshFixture) -cne '') { throw 'Windows-only catalog read an SSH key' }
+    $rejected = $false
+    try { $null = Get-RunnerAdminSshPublicKey -HasLinux $true -KeyFile $sshFixture } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Linux accepted a missing SSH key' }
+    Set-Content -LiteralPath $sshFixture -Value 'ssh-ed25519 fixture-only' -Encoding utf8
+    if ((Get-RunnerAdminSshPublicKey -HasLinux $true -KeyFile $sshFixture) -cne 'ssh-ed25519 fixture-only') { throw 'Linux SSH key contents changed' }
+    if ($IsLinux -or $IsMacOS) {
+        $bashSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'deploy-azure.sh') -Raw
+        $bashHelper = [regex]::Match($bashSource, '(?ms)^read_runner_ssh_key\(\) \{.*?^\}').Value
+        if (-not $bashHelper) { throw 'Bash SSH prerequisite helper was not found' }
+        $invokeHelper = $bashHelper + "`n" + 'read_runner_ssh_key "$1" "$2"'
+        $output = & bash -c $invokeHelper -- false ($sshFixture + '.missing') 2>&1
+        if ($LASTEXITCODE -ne 0 -or ($output -join '') -cne '') { throw 'Windows-only Bash prerequisite read an SSH key' }
+        $output = & bash -c $invokeHelper -- true ($sshFixture + '.missing') 2>&1
+        if ($LASTEXITCODE -ne 2) { throw 'Bash Linux prerequisite accepted a missing SSH key' }
+        $output = & bash -c $invokeHelper -- true $sshFixture 2>&1
+        if ($LASTEXITCODE -ne 0 -or ($output -join '') -cne 'ssh-ed25519 fixture-only') { throw 'Bash Linux SSH key contents changed' }
+    }
     foreach ($tier in @('P10', 'P15', 'P20', 'P30', 'P99', 'p20')) {
         $valid = $tier -cin @('P10', 'P15', 'P20', 'P30')
         $expected = if ($valid) { @("OS disk tier: $tier") } else { @() }
@@ -84,8 +108,17 @@ try {
     foreach ($enabled in @('false', 0, $null)) {
         Test-PoolDryRun -Name "invalid enabled '$enabled'" -Pools @(@{ name = 'test-pool'; vmSize = 'Standard_D4s_v5'; enabled = $enabled }) -Valid $false
     }
+    Test-PoolDryRun -Name 'shared automatic OS tags' -Pools @(@{ name = 'linux-one'; vmSize = 'Standard_D4s_v5'; labels = @('linux-one', 'Linux') }, @{ name = 'linux-two'; vmSize = 'Standard_D2s_v5'; labels = @('linux-two', 'linux') }) -Expected @('OS tag: Linux')
+    Test-PoolDryRun -Name 'Windows OS tag' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows'; labels = @('win', 'WINDOWS') }) -Expected @('OS tag: Windows')
+    foreach ($labels in @(@('Windows', 'profile'), @('macOS', 'profile'), @('Linux'))) {
+        Test-PoolDryRun -Name 'invalid Linux OS tag or missing profile' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; labels = $labels }) -Valid $false
+    }
     Test-PoolDryRun -Name 'all profiles disabled' -Pools @(@{ name = 'test-pool'; vmSize = 'Standard_D4s_v5'; enabled = $false }) -Valid $false
     Test-PoolDryRun -Name 'duplicate labels' -Pools @(@{ name = 'pool-one'; vmSize = 'Standard_D4s_v5'; labels = @('shared') }, @{ name = 'pool-two'; vmSize = 'Standard_D4s_v5'; labels = @('SHARED'); enabled = $false }) -Valid $false
+    Test-PoolDryRun -Name 'Windows-only skips shared Linux image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: false', 'Linux SSH key required: false')
+    Test-PoolDryRun -Name 'disabled Linux skips shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; enabled = $false }, @{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: false', 'Linux SSH key required: false')
+    Test-PoolDryRun -Name 'pinned Linux skips shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5'; imageId = '/images/linux' }) -Expected @('Shared Linux image required: false', 'Linux SSH key required: true')
+    Test-PoolDryRun -Name 'mixed inheriting Linux needs shared image' -Pools @(@{ name = 'linux-profile'; vmSize = 'Standard_D4s_v5' }, @{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/images/windows' }) -Expected @('Shared Linux image required: true')
     $manyPools = @(1..9 | ForEach-Object { @{ name = "test-pool-$_"; vmSize = 'Standard_D4s_v5' } })
     Test-PoolDryRun -Name 'more than eight pools' -Pools $manyPools -Expected @('test-pool-9: 0\.\.demand')
     Test-PoolDryRun -Name 'empty array' -Pools @() -Valid $false
@@ -105,8 +138,8 @@ try {
     }
 
     $example = Get-Content (Join-Path $PSScriptRoot '../runner-pools.example.json') -Raw | ConvertFrom-Json -NoEnumerate
-    if ($example.Count -ne 8 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 2) {
-        throw 'Example must have eight profiles with only the two one-core profiles disabled'
+    if ($example.Count -ne 14 -or @($example | Where-Object { $_.enabled -eq $false }).Count -ne 8) {
+        throw 'Example must have eight Linux profiles and six disabled Windows profiles, with Linux small profiles also disabled'
     }
     if ($example[0].name -cne 'avp-linux') { throw 'The legacy avp-linux pool must remain first for compatibility values' }
     foreach ($profile in @(@('s', 'Standard_F1als_v7'), @('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
@@ -124,9 +157,26 @@ try {
             if ($profile[0] -cne 's' -and $null -ne $matching[0].PSObject.Properties['enabled']) { throw "Enabled example profile must use the default: $label" }
         }
     }
-    Test-PoolDryRun -Name 'eight example profiles' -Pools $example -Expected @('avp-linux-s: disabled', 'avp-linux-xlp: 0\.\.demand', 'avp-linux labels: avp-linux, avp-linux-l;', 'avp-linux-lp labels: avp-linux-lp;')
+    if (@($example | Where-Object { $_.osType -ceq 'Windows' }).Count -ne 6 -or @($example | Where-Object { $_.labels -contains 'avp-windows-s' -or $_.labels -contains 'avp-windows-sp' }).Count -ne 0) {
+        throw 'The Windows catalog supports only M/MP, L/LP, and XL/XLP'
+    }
+    foreach ($profile in @(@('m', 'Standard_D2s_v5'), @('l', 'Standard_D4s_v5'), @('xl', 'Standard_D8s_v5'))) {
+        foreach ($premium in @($false, $true)) {
+            $label = 'avp-windows-' + $profile[0] + $(if ($premium) { 'p' } else { '' })
+            $tier = if ($premium) { 'P20' } else { 'P10' }
+            $matching = @($example | Where-Object { $_.name -ceq $label -and $_.vmSize -ceq $profile[1] -and $_.osDiskTier -ceq $tier })
+            if ($matching.Count -ne 1 -or $matching[0].enabled -ne $false -or $matching[0].osType -cne 'Windows' -or ($matching[0].labels -join ',') -cne $label) { throw "Incorrect Windows profile: $label" }
+        }
+    }
+    Test-PoolDryRun -Name 'Windows requires a qualified image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows' }) -Valid $false
+    Test-PoolDryRun -Name 'qualified Windows image' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows' }) -Expected @('pool imageId override')
+    Test-PoolDryRun -Name 'plaintext password rejected' -Pools @(@{ name = 'win'; vmSize = 'Standard_D4s_v5'; osType = 'Windows'; imageId = '/qualified/windows'; adminPassword = 'not-accepted' }) -Valid $false
+    foreach ($os in @($null, 'windows', '', 1, $true)) {
+        Test-PoolDryRun -Name 'invalid OS type' -Pools @(@{ name = 'invalid'; vmSize = 'Standard_D4s_v5'; osType = $os }) -Valid $false
+    }
+    Test-PoolDryRun -Name 'Linux and Windows example profiles' -Pools $example -Expected @('avp-linux-s: disabled', 'avp-linux-xlp: 0\.\.demand', 'avp-linux labels: avp-linux, avp-linux-l;', 'avp-linux-lp labels: avp-linux-lp;')
     Write-Output 'Shared-controller pool and disk-tier dry-run validation passed.'
 }
 finally {
-    Remove-Item -LiteralPath $poolFile -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $poolFile, $sshFixture -ErrorAction SilentlyContinue
 }
